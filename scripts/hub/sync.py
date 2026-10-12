@@ -6,7 +6,11 @@ The repo has one config per local manifest:
   dropped unsuitable photos), with their input and target images.
 - sprites: downloaded-data/manifest.csv rows, with their sprite image.
 
-A pull writes each config back as its folder's manifest.csv.
+Each config has a train and a test split. split() puts a row in test when the
+hash of its group key falls below the part's test share, so the split never
+changes between runs and near-copies (crops of one photo, colour variants of one
+tile, frames of one animation) always land in the same split. A pull writes both
+splits back into the folder's manifest.csv.
 
 Images are stored as their original file bytes, so a pull writes back exactly the
 files that were pushed. src/queries.json is uploaded too, as a record of the
@@ -17,10 +21,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from datasets import Dataset, Image, load_dataset
+from datasets import Dataset, DatasetDict, Image, load_dataset
 from huggingface_hub import DatasetCard, HfApi
 
 REPO = "ocdbytes/pixl-data"
@@ -36,13 +43,33 @@ class Part:
         name: Config name in the dataset repo.
         root: Folder holding manifest.csv; manifest paths are relative to it.
         images: Image column in the repo -> manifest column with the file path.
+        group: Returns a row's group key; rows with the same key share a split.
+        test_share: Fraction of groups in the test split.
         upload: CSV in root whose rows are pushed; pulls write manifest.csv.
     """
 
     name: str
     root: Path
     images: dict[str, str]
+    group: Callable[[dict[str, str]], str]
+    test_share: float
     upload: str = "manifest.csv"
+
+
+def sprite_group(row: dict[str, str]) -> str:
+    """Groups the frames of one animation, and one tile's colour variants.
+
+    Args:
+        row: Sprite manifest row.
+
+    Returns:
+        The path without its frame number for animation frames, e.g.
+        ".../Frames/cherry/cherry" for "cherry-3.png"; otherwise the pack and
+        file name, shared by the 1-Bit Pack's colored and monochrome variants.
+    """
+    if "/Frames/" in row["path"]:
+        return re.sub(r"[-_]?\d+\.png$", "", row["path"])
+    return f"{row['pack']}/{Path(row['path']).name}"
 
 
 PARTS = (
@@ -50,10 +77,33 @@ PARTS = (
         "photos",
         Path("pixel-image-data"),
         {"input": "input_path", "target": "target_path"},
+        group=lambda row: row["sha256"],  # all crops of one source photo
+        test_share=0.02,
         upload="clean.csv",
     ),
-    Part("sprites", Path("downloaded-data"), {"image": "path"}),
+    Part(
+        "sprites",
+        Path("downloaded-data"),
+        {"image": "path"},
+        group=sprite_group,
+        test_share=0.1,
+    ),
 )
+
+
+def split(part: Part, row: dict[str, str]) -> str:
+    """Names the split a manifest row belongs to.
+
+    Args:
+        part: The row's part.
+        row: Manifest row.
+
+    Returns:
+        "test" if the first 8 hex digits of the SHA-256 of the row's group key,
+        as a fraction of 16**8, are below part.test_share; otherwise "train".
+    """
+    digest = hashlib.sha256(part.group(row).encode()).hexdigest()
+    return "test" if int(digest[:8], 16) / 16**8 < part.test_share else "train"
 
 
 @dataclass
@@ -80,17 +130,23 @@ def push(repo: str) -> None:
     for part in PARTS:
         with part.root.joinpath(part.upload).open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
-            columns = {field: [] for field in reader.fieldnames or []}
-            for row in reader:
-                for field, values in columns.items():
-                    values.append(row[field])
-        for image, path_column in part.images.items():
-            columns[image] = [str(part.root.joinpath(p)) for p in columns[path_column]]
-        dataset = Dataset.from_dict(columns)
-        for image in part.images:
-            dataset = dataset.cast_column(image, Image())
-        print(f"pushing {len(dataset)} {part.name} to {repo}")
-        _ = dataset.push_to_hub(repo, config_name=part.name, private=True)
+            fields = reader.fieldnames or []
+            rows = list(reader)
+        splits = DatasetDict()
+        for name in ("train", "test"):
+            chosen = [row for row in rows if split(part, row) == name]
+            columns = {field: [row[field] for row in chosen] for field in fields}
+            for image, path_column in part.images.items():
+                columns[image] = [
+                    str(part.root.joinpath(row[path_column])) for row in chosen
+                ]
+            dataset = Dataset.from_dict(columns)
+            for image in part.images:
+                dataset = dataset.cast_column(image, Image())
+            splits[name] = dataset
+        sizes = ", ".join(f"{name} {len(data)}" for name, data in splits.items())
+        print(f"pushing {part.name} ({sizes}) to {repo}")
+        _ = splits.push_to_hub(repo, config_name=part.name, private=True)
     _ = HfApi().upload_file(
         path_or_fileobj=str(QUERIES),
         path_in_repo="queries.json",
@@ -122,8 +178,9 @@ def pull(repo: str) -> None:
     """Writes every part's images and manifest back to their local folders.
 
     A part whose manifest already exists is skipped, so local data is never
-    overwritten. The manifest is written last: an interrupted pull leaves no
-    manifest, and the next pull starts that part again.
+    overwritten. Both splits go into one manifest, train rows first. The manifest
+    is written last: an interrupted pull leaves no manifest, and the next pull
+    starts that part again.
 
     Args:
         repo: Dataset repo id.
@@ -133,20 +190,23 @@ def pull(repo: str) -> None:
         if manifest.exists():
             print(f"{manifest} exists; skipping {part.name} (delete it to pull again)")
             continue
-        dataset = load_dataset(repo, part.name, split="train")
-        for image in part.images:
-            dataset = dataset.cast_column(image, Image(decode=False))
-        print(f"writing {len(dataset)} {part.name} to {part.root}")
-        for row in dataset:
-            for image, path_column in part.images.items():
-                path = part.root.joinpath(row[path_column])
-                path.parent.mkdir(parents=True, exist_ok=True)
-                _ = path.write_bytes(row[image]["bytes"])
-        fields = [c for c in dataset.column_names if c not in part.images]
+        rows: list[dict[str, str]] = []
+        fields: list[str] = []
+        for name, dataset in load_dataset(repo, part.name).items():
+            for image in part.images:
+                dataset = dataset.cast_column(image, Image(decode=False))
+            fields = [c for c in dataset.column_names if c not in part.images]
+            print(f"writing {len(dataset)} {part.name} ({name}) to {part.root}")
+            for row in dataset:
+                for image, path_column in part.images.items():
+                    path = part.root.joinpath(row[path_column])
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    _ = path.write_bytes(row[image]["bytes"])
+                rows.append({field: row[field] for field in fields})
         with manifest.open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
+            writer = csv.DictWriter(file, fieldnames=fields)
             writer.writeheader()
-            writer.writerows(dataset.remove_columns(list(part.images)))
+            writer.writerows(rows)
 
 
 def parse_args() -> Args:

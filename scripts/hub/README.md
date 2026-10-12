@@ -11,6 +11,21 @@
 
 Every manifest column is kept as text, including captions, labels, authors, licences and source URLs. Images are stored as their original file bytes in Parquet files, so a pull writes back exactly the files that were pushed. `queries.json` is uploaded as a record of the queries that built the photos.
 
+### Train and test splits
+
+Each config has a `train` and a `test` split. Splitting by row would put near-copies in both splits, so rows are split by group:
+
+| Config | Group key (`Part.group`) | Test share | train / test rows |
+|---|---|---|---|
+| `photos` | `sha256` of the source photo, so all crops of one photo stay together | 2% | 82,651 / 1,639 |
+| `sprites` | `sprite_group`: animation frames without their number (`cherry-3` → `cherry`); other sprites by pack and file name, so the 4 colour variants of a 1-Bit Pack tile stay together | 10% | 5,144 / 541 |
+
+`split(part, row)` puts a row in `test` when the first 8 hex digits of the SHA-256 of its group key, as a fraction of 16⁸, are below the test share. The result depends only on the key, so the split never changes between runs and new data never moves existing rows. Training code should call the same function to split local data the same way.
+
+All 73 Buch sprites are frames of one sprite sheet (`characters_0000` …), so they form one group and are all in `train`.
+
+A pull writes both splits into one `manifest.csv`, train rows first, so its row order differs from the original manifest.
+
 The dataset card shown on the Hub is [`card.md`](card.md). `push` uploads it too; after editing only the card, run `sync card`. Its YAML is merged into the card's metadata block, which keeps the config and feature metadata that `push` writes there for the loader.
 
 Parquet is used because the Hub allows at most 10,000 files per folder and recommends under 100,000 files per repo ([storage limits](https://huggingface.co/docs/hub/storage-limits)); `pixel-image-data/input/` alone has ~99k files.

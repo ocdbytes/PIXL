@@ -29,9 +29,20 @@ Training data for **pixl**, a small text-to-pixel-art model trained from scratch
 ```python
 from datasets import load_dataset
 
-photos = load_dataset("ocdbytes/pixl-data", "photos", split="train")
-sprites = load_dataset("ocdbytes/pixl-data", "sprites", split="train")
+photos = load_dataset("ocdbytes/pixl-data", "photos")    # {"train": ..., "test": ...}
+sprites = load_dataset("ocdbytes/pixl-data", "sprites")
+
+train = load_dataset("ocdbytes/pixl-data", "photos", split="train")  # one split only
 ```
+
+## Splits
+
+| Config | train | test | Kept together in one split |
+|---|---|---|---|
+| `photos` | ~82.7k | ~1.6k (2% of source photos) | All crops of one source photo (same `sha256`) |
+| `sprites` | ~5.1k | ~540 (10% of groups) | The colour variants of one tile, and the frames of one animation |
+
+Near-copies never appear in both splits, so test scores are not inflated by images the model has already seen. A group is in `test` when the first 8 hex digits of the SHA-256 of its key, as a fraction of 16⁸, are below 0.02 (photos) or 0.1 (sprites). The split is fixed: new data never moves existing rows.
 
 ## photos
 
