@@ -11,6 +11,8 @@
 
 Every manifest column is kept as text, including captions, labels, authors, licences and source URLs. Images are stored as their original file bytes in Parquet files, so a pull writes back exactly the files that were pushed. `queries.json` is uploaded as a record of the queries that built the photos.
 
+The dataset card shown on the Hub is [`card.md`](card.md). `push` uploads it too; after editing only the card, run `sync card`. Its YAML is merged into the card's metadata block, which keeps the config and feature metadata that `push` writes there for the loader.
+
 Parquet is used because the Hub allows at most 10,000 files per folder and recommends under 100,000 files per repo ([storage limits](https://huggingface.co/docs/hub/storage-limits)); `pixel-image-data/input/` alone has ~99k files.
 
 ## Run
@@ -26,6 +28,7 @@ From the project root:
 ```bash
 uv run python -m scripts.hub.sync push   # upload local data, replacing the repo's copy
 uv run python -m scripts.hub.sync pull   # download into pixel-image-data/ and downloaded-data/
+uv run python -m scripts.hub.sync card   # upload only the dataset card (card.md)
 ```
 
 `pull` is step 1 of [`src/setup_data.py`](../../src/setup_data.py) by default.

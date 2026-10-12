@@ -7,7 +7,7 @@ The repo has one config per local manifest:
 
 Images are stored as their original file bytes, so a pull writes back exactly the
 files that were pushed. src/queries.json is uploaded too, as a record of the
-queries that built the photos.
+queries that built the photos, and scripts/hub/card.md becomes the dataset card.
 """
 
 from __future__ import annotations
@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset, Image, load_dataset
-from huggingface_hub import HfApi
+from huggingface_hub import DatasetCard, HfApi
 
 REPO = "ocdbytes/pixl-data"
 QUERIES = Path("src/queries.json")
+CARD = Path("scripts/hub/card.md")
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,25 @@ def push(repo: str) -> None:
         repo_id=repo,
         repo_type="dataset",
     )
+    push_card(repo)
+
+
+def push_card(repo: str) -> None:
+    """Replaces the dataset card with CARD, keeping the config metadata.
+
+    push_to_hub writes the configs and features into the card's YAML block; the
+    loader needs them, so CARD's YAML is merged into that block instead of
+    replacing it.
+
+    Args:
+        repo: Dataset repo id.
+    """
+    card = DatasetCard.load(repo, repo_type="dataset")
+    template = DatasetCard(CARD.read_text(encoding="utf-8"))
+    for key, value in template.data.to_dict().items():
+        setattr(card.data, key, value)
+    card.text = template.text
+    _ = card.push_to_hub(repo, repo_type="dataset")
 
 
 def pull(repo: str) -> None:
@@ -120,7 +140,9 @@ def parse_args() -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    _ = parser.add_argument("command", choices=("push", "pull"))
+    _ = parser.add_argument(
+        "command", choices=("push", "pull", "card"), help="card: push only the card"
+    )
     _ = parser.add_argument("--repo", default=Args.repo)
     return parser.parse_args(namespace=Args())
 
@@ -129,6 +151,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "push":
         push(args.repo)
+    elif args.command == "card":
+        push_card(args.repo)
     else:
         pull(args.repo)
 
