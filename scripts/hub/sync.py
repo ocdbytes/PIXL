@@ -1,9 +1,12 @@
-"""Pushes the local training data to a private Hugging Face dataset repo, or pulls it back.
+"""Pushes the local training data to the public Hugging Face dataset repo, or pulls it back.
 
 The repo has one config per local manifest:
 
-- photos: pixel-image-data/manifest.csv rows, with their input and target images.
+- photos: pixel-image-data/clean.csv rows (the manifest after scripts.refine
+  dropped unsuitable photos), with their input and target images.
 - sprites: downloaded-data/manifest.csv rows, with their sprite image.
+
+A pull writes each config back as its folder's manifest.csv.
 
 Images are stored as their original file bytes, so a pull writes back exactly the
 files that were pushed. src/queries.json is uploaded too, as a record of the
@@ -33,11 +36,13 @@ class Part:
         name: Config name in the dataset repo.
         root: Folder holding manifest.csv; manifest paths are relative to it.
         images: Image column in the repo -> manifest column with the file path.
+        upload: CSV in root whose rows are pushed; pulls write manifest.csv.
     """
 
     name: str
     root: Path
     images: dict[str, str]
+    upload: str = "manifest.csv"
 
 
 PARTS = (
@@ -45,6 +50,7 @@ PARTS = (
         "photos",
         Path("pixel-image-data"),
         {"input": "input_path", "target": "target_path"},
+        upload="clean.csv",
     ),
     Part("sprites", Path("downloaded-data"), {"image": "path"}),
 )
@@ -61,11 +67,18 @@ def push(repo: str) -> None:
 
     Args:
         repo: Dataset repo id; created as private if it does not exist.
+
+    Raises:
+        SystemExit: If a part's upload CSV is missing, e.g. refine has not run.
     """
     for part in PARTS:
-        with part.root.joinpath("manifest.csv").open(
-            newline="", encoding="utf-8"
-        ) as file:
+        upload = part.root.joinpath(part.upload)
+        if not upload.exists():
+            raise SystemExit(
+                f"{upload} not found: run scripts.refine.clip_filter first"
+            )
+    for part in PARTS:
+        with part.root.joinpath(part.upload).open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
             columns = {field: [] for field in reader.fieldnames or []}
             for row in reader:

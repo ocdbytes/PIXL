@@ -21,7 +21,7 @@ Training data for **pixl**, a small text-to-pixel-art model trained from scratch
 
 | Config | Rows | What it holds |
 |---|---|---|
-| `photos` | ~99k | Photo pairs: a 256×256 photo (`input`), a 32×32, 24-colour version of it (`target`), and a caption (`query`) |
+| `photos` | ~84k | Photo pairs: a 256×256 photo (`input`), a 32×32, 24-colour version of it (`target`), and a caption (`query`) |
 | `sprites` | ~5.7k | CC0 game sprites (`image`) with a short label (`label`) |
 
 ## Load
@@ -38,7 +38,13 @@ sprites = load_dataset("ocdbytes/pixl-data", "sprites", split="train")
 | Source | Caption |
 |---|---|
 | [Open Images V7](https://storage.googleapis.com/openimages/web/index.html) | A box label or a relationship between two boxes drawn by people, e.g. "dog", "man riding horse", "wooden table". The photo is cropped around the box. |
-| [Wikimedia Commons](https://commons.wikimedia.org/), [Openverse](https://openverse.org/) | The search query that found the photo, e.g. "arcade cabinet". These captions are noisy: a CLIP check found that about 1 in 5 web photos does not show its query. |
+| [Wikimedia Commons](https://commons.wikimedia.org/), [Openverse](https://openverse.org/) | The search query that found the photo, e.g. "arcade cabinet". |
+
+Photos were filtered before upload. A photo was removed when:
+
+- [CLIP](https://huggingface.co/openai/clip-vit-base-patch32) matched it more closely to prompts for nudity or graphic content (gore, dead bodies, injuries) than to neutral prompts;
+- it came from a web search and CLIP found it does not show its query;
+- it is CC BY but has no author to credit, or its author field is an email address.
 
 Every photo was changed:
 
@@ -86,6 +92,6 @@ Google lists Open Images photos as CC BY 2.0 but [does not guarantee](https://st
 
 ## Known issues
 
-- Web captions are noisy (see above).
-- Some photos show real people, including nude photos and a few graphic images (wounds, dead animals). A CLIP screen found them; they have not been removed yet.
-- Some photos show brand logos or photographers' watermarks.
+- Web captions are still somewhat noisy: in a sample of 30 web photos that passed the CLIP check, 4 did not show their query.
+- The nudity and graphic-content filter is automatic and can miss photos. Please report any you find.
+- Many photos show real people. Some show brand logos or photographers' watermarks.

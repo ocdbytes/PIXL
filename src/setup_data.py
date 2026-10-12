@@ -1,14 +1,15 @@
 """Sets up the training data in three steps.
 
 1. Get the photo pairs and sprites, from one of two sources (--source):
-   - hub (default): pull them from the private Hugging Face dataset repo
+   - hub (default): pull them from the public Hugging Face dataset repo
      (scripts.hub.sync). Takes minutes; skips data that is already on disk.
    - build: download photo pairs from Open Images, Wikimedia and Openverse for
      the queries in src/queries.json (scripts.data.build). Takes 1-2 days and
      resumes if stopped. Sprites must already be in downloaded-data.
 2. Label sprites that have no label yet, keeping existing labels, and gather
    every sprite into one folder (scripts.labeler.label).
-3. Drop web photo pairs whose photo does not match its query and write
+3. Drop photo pairs with nudity or graphic content, web photos that do not
+   match their query, and CC BY photos that cannot be credited, and write
    clean.csv next to the photos (scripts.refine.clip_filter).
 
 Each step runs as its own process, so one step's model is freed before the next.
