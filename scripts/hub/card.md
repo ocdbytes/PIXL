@@ -30,7 +30,7 @@ Training data for **pixl**, a small text-to-pixel-art model trained from scratch
 ```python
 from datasets import load_dataset
 
-photos = load_dataset("ocdbytes/pixl-data", "photos")    # {"train": ..., "test": ...}
+photos = load_dataset("ocdbytes/pixl-data", "photos")  # {"train": ..., "test": ...}
 sprites = load_dataset("ocdbytes/pixl-data", "sprites")
 scenes = load_dataset("ocdbytes/pixl-data", "scenes")
 

@@ -50,7 +50,7 @@ def run(module: str, *args: str) -> None:
         SystemExit: If the step fails, so later steps never see partial output.
     """
     print(f"\n== {module}", flush=True)
-    if subprocess.run([sys.executable, "-m", module, *args]).returncode:
+    if subprocess.run([sys.executable, "-m", module, *args], check=False).returncode:
         raise SystemExit(f"setup stopped: {module} failed")
 
 

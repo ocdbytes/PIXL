@@ -26,6 +26,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from datasets import Dataset, DatasetDict, Image, load_dataset
 from huggingface_hub import DatasetCard, HfApi
@@ -40,6 +41,12 @@ Split = Callable[[dict[str, str]], str]
 
 def hashed_split(group: Callable[[dict[str, str]], str], test_share: float) -> Split:
     """Makes a split function that keeps each group of rows in one split.
+
+    To ensure that the images from the same crop don't (openimages have objects
+    listed from same picture) get split into train and test causing dataleak.
+    For wikimedia this is not a concern. Similarly for sprites we group the
+    color variants and separated animation frames we send them to same split
+    otherwise for standalone sprites we are fine with them being split any way.
 
     Args:
         group: Returns a row's group key; rows with the same key share a split.
@@ -209,7 +216,8 @@ def pull(repo: str, parts: list[Part]) -> None:
                 dataset = dataset.cast_column(image, Image(decode=False))
             fields = [c for c in dataset.column_names if c not in part.images]
             print(f"writing {len(dataset)} {part.name} ({name}) to {part.root}")
-            for row in dataset:
+            for raw_row in dataset:
+                row = cast(dict[str, Any], raw_row)
                 for image, path_column in part.images.items():
                     path = part.root.joinpath(row[path_column])
                     path.parent.mkdir(parents=True, exist_ok=True)

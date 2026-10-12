@@ -19,6 +19,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 from datasets import load_dataset
@@ -73,7 +74,10 @@ def build_palette(
     free = size - len(kept)
     strip = Image.fromarray(pixels.reshape(1, -1, 3))
     picked = strip.quantize(free, method=Image.Quantize.MEDIANCUT, kmeans=3)
-    extra = np.array(picked.getpalette()[: 3 * free], np.uint8).reshape(-1, 3)
+    picked_palette = picked.getpalette()
+    if picked_palette is None:
+        raise ValueError("quantization produced no palette")
+    extra = np.array(picked_palette[: 3 * free], np.uint8).reshape(-1, 3)
     return np.unique(np.concatenate([kept, extra]), axis=0)
 
 
@@ -93,6 +97,9 @@ def encode(image: Image.Image, palette: np.ndarray) -> np.ndarray:
     colours, inverse = np.unique(
         rgba[..., :3].reshape(-1, 3), axis=0, return_inverse=True
     )
+    # TODO :
+    # Try Oklab distance if the colors generated are very off palette
+    # It matters for non sprite images only
     distance = ((colours[:, None].astype(np.int32) - palette[None]) ** 2).sum(axis=-1)
     nearest = (distance.argmin(axis=1) + 1).astype(np.uint8)
     tokens = nearest[inverse.reshape(-1)].reshape(rgba.shape[:2])
@@ -143,13 +150,16 @@ def parse_args() -> Args:
 
 def main() -> None:
     args = parse_args()
+    sprite_data = cast(Any, load_dataset(REPO, "sprites"))
     sprites = [
         row["image"]
-        for split in load_dataset(REPO, "sprites").values()
+        for split in sprite_data.values()
         for row in split.select_columns(["image"])
     ]
     # Train split only, so test photos do not shape the palette.
-    photos = load_dataset(REPO, "photos", split="train").select_columns(["target"])
+    photos = cast(Any, load_dataset(REPO, "photos", split="train")).select_columns(
+        ["target"]
+    )
     sample = [
         row["target"] for row in photos.shuffle(seed=0).select(range(args.photos))
     ]

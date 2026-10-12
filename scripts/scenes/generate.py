@@ -292,9 +292,11 @@ def make_scenes(
         else:
             chosen = rng.sample(pool, 2)
             pair_held_out = held_out(chosen[0].label, chosen[1].label)
-            if chosen[0].label == chosen[1].label or (
-                kind != "new sprites" and pair_held_out != (kind == "new pair")
-            ):
+            if chosen[0].label == chosen[1].label:
+                continue
+            if kind == "train" and pair_held_out:
+                continue
+            if kind == "new pair" and not pair_held_out:
                 continue
             line, first, second = rng.randrange(grid), *rng.sample(range(grid), 2)
             cells = [(line, first), (line, second)]

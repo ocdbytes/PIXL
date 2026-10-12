@@ -27,6 +27,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from PIL import Image, ImageDraw
@@ -61,12 +62,16 @@ SCORES = ["query_score", "rank", "nudity", "graphic"]
 class Args(argparse.Namespace):
     data: Path = Path("pixel-image-data")
     # Defaults keep 94% of Open Images pairs, whose queries are known to be right.
+    # the model script was ran on open images pairs to compute this value because
+    # open images are supposed to be having correct captioning.
     min_score: float = 0.22
     top_k: int = 50
     # Chosen by reviewing the dropped photos: below 0.02 photos are rarely nude;
     # below 0.0395 graphic flags are mostly harmless or mild (dead animals, make-up).
     nudity: float = 0.02
     graphic: float = 0.0395
+    # If True, the script will store the sheets of flagged photos
+    # at each score in order to review.
     sheets: bool = False
 
 
@@ -76,7 +81,21 @@ def load_image(path: Path) -> Image.Image:
 
 
 def normalize(embeddings: torch.Tensor) -> torch.Tensor:
-    return embeddings / embeddings.norm(dim=-1, keepdim=True)
+    """
+    Normalises the embeddings along the last dimension
+    This is needed for similarity calculation as this
+    will scale the length of the vector to 1
+
+    Eg :
+
+    >> a = torch.Tensor([3, 4])
+    >> normalize(a)
+       sqrt(9 + 16) = 5
+       [3/5, 4/5]
+    >> [0.6, 0.8]
+       sqrt(0.36 + 0.64) = 1
+    """
+    return torch.nn.functional.normalize(embeddings, dim=-1)
 
 
 @torch.inference_mode()
@@ -93,7 +112,9 @@ def embed_texts(
     Returns:
         A len(texts) x 512 float32 tensor on the CPU, each row of length 1.
     """
-    inputs = processor(text=texts, padding=True, return_tensors="pt").to(DEVICE)
+    inputs = cast(Any, processor)(text=texts, padding=True, return_tensors="pt").to(
+        DEVICE
+    )
     return normalize(
         model.text_projection(model.text_model(**inputs).pooler_output)
     ).cpu()
@@ -118,10 +139,15 @@ def embed_photos(
     with ThreadPoolExecutor(8) as pool:
         for start in range(0, len(paths), batch_size):
             images = list(pool.map(load_image, paths[start : start + batch_size]))
-            pixels = processor(images=images, return_tensors="pt")["pixel_values"]
+            pixels = cast(Any, processor)(images=images, return_tensors="pt")[
+                "pixel_values"
+            ]
             photos = model.visual_projection(
                 model.vision_model(pixel_values=pixels.to(DEVICE)).pooler_output
             )
+            # .half is an optimisation for embedding normalization
+            # so cache size is half and the error difference is not
+            # that much
             batches.append(normalize(photos).half().cpu())
             print(f"embedded {min(start + batch_size, len(paths))}/{len(paths)}")
     return torch.cat(batches)
@@ -212,7 +238,7 @@ def main() -> None:
         fields = reader.fieldnames or []
         rows = list(reader)
 
-    model = CLIPModel.from_pretrained(CLIP).eval().to(DEVICE)
+    model = cast(Any, CLIPModel.from_pretrained(CLIP)).eval().to(DEVICE)
     processor = CLIPProcessor.from_pretrained(CLIP)
 
     cache = args.data.joinpath(CACHE)

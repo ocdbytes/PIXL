@@ -1,20 +1,17 @@
-"""Loads pixl-data from the Hugging Face Hub as captions and palette token grids.
+"""Loads pixl-data as captions and 32x32 palette-token tensors.
 
-Each row becomes {"caption": str, "tokens": SIZE x SIZE int64 tensor} using the
-palette in src/palette.json (see src/preprocess.py). Photo targets and scenes
-are already 32x32. Sprites are centred on a transparent canvas; the 51 sprites larger than
-the canvas (Sunny Land backgrounds and big frames) are skipped. Tokens are
-computed once per split and cached by the datasets library, so later loads are
-fast; a new palette makes them be computed again.
-
-    from src.data import loader
+Photos and scenes are already 32x32. Sprites are centred on a transparent
+canvas, and oversized sprites are skipped. Encoded tokens are cached by the
+datasets library.
 
     for batch in loader("photos", "train", batch_size=64):
-        batch["caption"]  # 64 strings
-        batch["tokens"]   # (64, 32, 32) int64, ready for nn.Embedding
+        batch["caption"]  # list[str]
+        batch["tokens"]   # (64, 32, 32) int64
 """
 
 from __future__ import annotations
+
+from typing import Any, cast
 
 import numpy as np
 from datasets import Array2D, Dataset, Features, Value, load_dataset
@@ -83,7 +80,7 @@ def load(config: str, split: str) -> Dataset:
     return data.with_format("torch")
 
 
-def loader(config: str, split: str, batch_size: int = 64) -> DataLoader:
+def loader(config: str, split: str, batch_size: int = 64) -> DataLoader[dict[str, Any]]:
     """Batches one split; the train split is shuffled every epoch.
 
     Args:
@@ -95,5 +92,7 @@ def loader(config: str, split: str, batch_size: int = 64) -> DataLoader:
         A DataLoader of {"caption": list[str], "tokens": (batch, SIZE, SIZE) int64}.
     """
     return DataLoader(
-        load(config, split), batch_size=batch_size, shuffle=split == "train"
+        cast(Any, load(config, split)),
+        batch_size=batch_size,
+        shuffle=split == "train",
     )

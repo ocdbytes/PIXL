@@ -8,6 +8,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from PIL import Image, ImageOps
@@ -204,7 +205,8 @@ def label_with_clip(
         (label, probability) per path, in order. The probability is a softmax
         over the whole vocabulary, so it stays low when several labels fit.
     """
-    text = processor(
+    process = cast(Any, processor)
+    text = process(
         text=[PROMPT.format(v) for v in vocabulary], padding=True, return_tensors="pt"
     )
     labels = model.text_projection(model.text_model(**text).pooler_output)
@@ -212,7 +214,7 @@ def label_with_clip(
     results: list[tuple[str, float]] = []
     for start in range(0, len(paths), batch_size):
         images = load_images(paths[start : start + batch_size], 224)
-        pixels = processor(images=images, return_tensors="pt")["pixel_values"]
+        pixels = process(images=images, return_tensors="pt")["pixel_values"]
         embeds = model.visual_projection(
             model.vision_model(pixel_values=pixels).pooler_output
         )
@@ -233,8 +235,8 @@ def load_florence() -> tuple[Florence2ForConditionalGeneration, AutoProcessor]:
     Returns:
         The model in eval mode and its processor.
     """
-    model = Florence2ForConditionalGeneration.from_pretrained(FLORENCE).to(DEVICE)
-    return model.eval(), AutoProcessor.from_pretrained(FLORENCE)
+    model = cast(Any, Florence2ForConditionalGeneration.from_pretrained(FLORENCE))
+    return model.to(DEVICE).eval(), AutoProcessor.from_pretrained(FLORENCE)
 
 
 @torch.inference_mode()
@@ -256,14 +258,16 @@ def label_with_florence(
         One caption per path, in order.
     """
     captions: list[str] = []
+    dynamic_model = cast(Any, model)
+    process = cast(Any, processor)
     for start in range(0, len(paths), batch_size):
         images = load_images(paths[start : start + batch_size], 768)
-        inputs = processor(
+        inputs = process(
             text=["<CAPTION>"] * len(images), images=images, return_tensors="pt"
-        ).to(model.device)
-        ids = model.generate(**inputs, max_new_tokens=40, num_beams=3)
+        ).to(dynamic_model.device)
+        ids = dynamic_model.generate(**inputs, max_new_tokens=40, num_beams=3)
         captions += [
-            c.strip() for c in processor.batch_decode(ids, skip_special_tokens=True)
+            c.strip() for c in process.batch_decode(ids, skip_special_tokens=True)
         ]
         print(f"captioned {len(captions)}/{len(paths)}")
     return captions

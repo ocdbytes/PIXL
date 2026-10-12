@@ -1,110 +1,74 @@
 # pixl
 
-Pixl is a pixel-art generation model. It will learn to generate small, palette-controlled pixel art from text prompts.
+Pixl is a text-to-pixel-art model. It represents 32×32 images with a shared 256-token colour palette and generates them one pixel at a time with a decoder-only Transformer.
 
-The training data and its image tokens (the shared palette) are ready; the caption tokenizer, model and training code come next.
+Stage 1 photo pretraining, the datasets, tokenizers, and model are ready. Later training stages are not yet implemented.
 
-## Setup
+## Setup and train
 
 ```bash
 uv sync
 ```
 
-### Train
-
-Nothing else is needed. [`src/data.py`](src/data.py) loads the public Hugging Face dataset [`ocdbytes/pixl-data`](https://huggingface.co/datasets/ocdbytes/pixl-data) on first use (about 2.4 GB into `~/.cache/huggingface`), and the palette is in the repo; see [Model input](#model-input).
-
-### Change the dataset
-
-Only needed to change the data itself: new queries, new sprite packs or new labels.
-
-1. **Get the sprites.** The sprite packs are downloaded by hand into `downloaded-data/` (see [`sources.md`](sources.md)). To start from the current data instead, run `uv run python -m scripts.hub.sync pull`, which writes the Hub copy into `pixel-image-data/` and `downloaded-data/`.
-2. **Rebuild:**
-
-   ```bash
-   uv run python -m src.setup_data --user-agent "PixlDataset/0.1 (your-email@example.com)"
-   ```
-
-   | Step | Script | What it does | Time |
-   |---|---|---|---|
-   | 1. Download | [`scripts/data`](scripts/data/README.md) | Photo pairs from Open Images, Wikimedia and Openverse for the queries in [`src/queries.json`](src/queries.json) | 1–2 days the first time; resumes if stopped |
-   | 2. Label | [`scripts/labeler`](scripts/labeler/README.md) | Labels sprites that have no label yet (existing labels are kept) and gathers all sprites into `downloaded-data/labeled/` | Seconds when nothing is unlabelled |
-   | 3. Refine | [`scripts/refine`](scripts/refine/README.md) | Drops photo pairs with nudity or graphic content, web photos that do not match their query, and CC BY photos that cannot be credited; writes `pixel-image-data/clean.csv` and review sheets | ~12 minutes the first time, then seconds |
-   | 4. Scenes | [`scripts/scenes`](scripts/scenes/README.md) | Builds 52,000 captioned 32×32 scenes from the sprites (e.g. "a pine tree left of a barrel on grass") into `scene-data/`, with review sheets | ~15 seconds |
-
-   The script stops at once if `downloaded-data/manifest.csv` is missing, and stops if a step fails. Add `--label-model florence` to label new sprites with Florence-2 instead of CLIP. Every step can also be run on its own; see its README.
-3. **Review** the sheets in `pixel-image-data/review/` (photos dropped for nudity or graphic content) and `scene-data/review/` (sprite roles and sample scenes). Change the cut-offs or rules if needed.
-4. **Upload** with `uv run python -m scripts.hub.sync push`. Every push is public at once.
-
-## Model input
-
-The model reads images as grids of palette tokens, loaded straight from the Hugging Face dataset; local data is only needed to build or change the dataset.
-
-**Palette** (`src/preprocess.py`, saved in `src/palette.json`): token 0 is transparent and tokens 1–255 are colours, so the vocabulary is 256 tokens and each pixel fits in one byte.
-
-| Colours | From | Effect |
-|---|---|---|
-| 210 | Every colour the sprites use | Sprites are encoded pixel-exact (5,685/5,685) |
-| 45 | Median cut over 5,000 photo targets from the train split | Photo targets change by 6.7 per colour channel (0–255) on average |
-
-`encode(image, palette)` maps each pixel to the nearest colour (no dithering) and pixels with alpha below 128 to token 0; `decode(tokens, palette)` turns tokens back into an RGBA image. A trained model only works with the palette it was trained on, so rebuild the palette only before training from scratch:
+Open [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) in VS Code with the project's `.venv` kernel, or start Jupyter:
 
 ```bash
-uv run python -m src.preprocess
+uv run --with jupyter jupyter lab
 ```
 
-**Loader** (`src/data.py`): each row becomes a caption and a 32×32 token grid. Photo targets are already 32×32; sprites are centred on a transparent 32×32 canvas, and the 51 sprites larger than that are skipped. Tokens are computed once per split and cached by the `datasets` library.
+The notebook loads the public [`ocdbytes/pixl-data`](https://huggingface.co/datasets/ocdbytes/pixl-data) dataset automatically. The first photo load downloads about 2.4 GB. Three epochs take about 3.5 hours on the measured Apple-silicon GPU; checkpoints are written to `checkpoints/`. Set `QUICK = True` for a short smoke test.
 
-```python
-from src.data import loader
+See [`src/README.md`](src/README.md) for the palette, caption tokenizer, data loader, model architecture, and training details.
 
-for batch in loader("photos", "train", batch_size=64):  # or "sprites", "scenes"; "test"
-    batch["caption"]  # 64 strings, e.g. "man riding horse"
-    batch["tokens"]   # (64, 32, 32) int64 palette tokens (stored as uint8 in the cache)
+## Project map
+
+| Path | Purpose |
+|---|---|
+| [`src/`](src/README.md) | Palette and caption tokenizers, data loader, model, and data setup |
+| [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) | Stage 1 photo pretraining |
+| [`misc/retro.py`](misc/retro.py) | Training displays |
+| [`scripts/data/`](scripts/data/README.md) | Download and build aligned photo/pixel-art pairs |
+| [`scripts/labeler/`](scripts/labeler/README.md) | Label and gather sprite assets |
+| [`scripts/refine/`](scripts/refine/README.md) | Remove unsuitable or mismatched photo pairs |
+| [`scripts/scenes/`](scripts/scenes/README.md) | Build captioned scenes from sprites |
+| [`scripts/hub/`](scripts/hub/README.md) | Push and pull the Hugging Face dataset |
+| [`sources.md`](sources.md) | Approved and rejected sprite sources |
+
+Generated data lives in `pixel-image-data/`, `downloaded-data/`, and `scene-data/`. Model states live in `checkpoints/`. These directories are excluded from Git.
+
+## Change the dataset
+
+This is only needed for new photo queries, sprite packs, or labels. To start from the current Hub data:
+
+```bash
+uv run python -m scripts.hub.sync pull
 ```
 
-| Config | train | test |
-|---|---|---|
-| `photos` | 82,651 | 1,639 |
-| `sprites` | 5,104 | 530 |
-| `scenes` | 50,000 | 2,000 (1,000 with unseen sprites, 1,000 with unseen object pairs) |
+Alternatively, place approved sprite packs in `downloaded-data/`, then run the complete pipeline:
 
-The first load of the photos downloads about 2.4 GB into `~/.cache/huggingface`.
-
-## Project structure
-
-```text
-pixl/
-├── src/
-│   ├── setup_data.py  # Set up all training data: get, label, refine
-│   ├── queries.json   # Queries for the photo download
-│   ├── preprocess.py  # Build the shared palette; encode images as tokens
-│   ├── palette.json   # The shared palette (256 tokens)
-│   └── data.py        # Load the Hub dataset as captions + token grids
-├── scripts/
-│   ├── data/          # Download and build aligned photo/pixel-art pairs
-│   ├── hub/           # Push and pull the data to the Hugging Face dataset repo
-│   ├── labeler/       # Label and collect downloaded sprite assets
-│   ├── refine/        # Drop unsuitable photo pairs (CLIP and licence checks)
-│   └── scenes/        # Build captioned scenes from the sprites
-├── pixel-image-data/  # Generated model-training dataset
-├── scene-data/        # Generated scenes
-├── downloaded-data/   # Downloaded sprite packs and generated labels
-├── sources.md         # Approved and rejected data sources
-├── LICENSE            # BSD 3-Clause license
-└── pyproject.toml     # Python project metadata and dependencies
+```bash
+uv run python -m src.setup_data --user-agent "PixlDataset/0.1 (your-email@example.com)"
 ```
 
-- [`scripts/data`](scripts/data/README.md) contains the automated data acquisition and dataset-building pipeline.
-- [`scripts/hub`](scripts/hub/README.md) pushes the local data to the public dataset repo and pulls it back.
-- [`scripts/labeler`](scripts/labeler/README.md) labels sprites with CLIP or Florence-2 and gathers them into a flat dataset.
-- [`scripts/refine`](scripts/refine/README.md) drops photo pairs that should not be trained on or published and writes `clean.csv`.
-- [`scripts/scenes`](scripts/scenes/README.md) builds captioned 32×32 scenes from the sprites.
-- `pixel-image-data/` contains generated `input/` photos, `target/` pixel-art images, their manifest and `clean.csv`.
-- `downloaded-data/` contains source sprite packs, archives, and generated labelled datasets.
+The pipeline runs four steps:
 
-The data directories are generated locally and excluded from Git.
+| Step | Details | Typical time |
+|---|---|---:|
+| Download photo pairs | [`scripts/data`](scripts/data/README.md) | 1–2 days initially; resumable |
+| Label sprites | [`scripts/labeler`](scripts/labeler/README.md) | Seconds when nothing is new |
+| Filter photos | [`scripts/refine`](scripts/refine/README.md) | About 12 minutes initially, then seconds |
+| Generate scenes | [`scripts/scenes`](scripts/scenes/README.md) | About 15 seconds |
+
+`downloaded-data/manifest.csv` must exist before running the pipeline. Add `--label-model florence` to label new sprites with Florence-2. Each step can also run independently using the commands in its README.
+
+Review `pixel-image-data/review/` and `scene-data/review/`, then upload:
+
+```bash
+uv run python -m scripts.hub.sync push
+```
+
+A push updates the public dataset immediately. See the [Hub README](scripts/hub/README.md) for split and overwrite behavior.
 
 ## License
 
-The project code is available under the [BSD 3-Clause License](LICENSE). Reuse and redistribution must retain the copyright and license notice crediting `ocdbytes`. Downloaded source images and datasets remain subject to their respective licenses.
+The code is available under the [BSD 3-Clause License](LICENSE). Reuse must retain its copyright and license notice. Downloaded images and datasets remain subject to their original licences.

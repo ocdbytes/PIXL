@@ -111,7 +111,7 @@ def parse_args() -> Args:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    output = Path(config["output"])
+    output = Path(cast(str, config.get("output")))
     client = HttpClient(args.user_agent)
     total = 0
 

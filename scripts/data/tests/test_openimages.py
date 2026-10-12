@@ -84,9 +84,11 @@ class OpenImagesSourceTest(unittest.TestCase):
         self.assertEqual(len(source.records["running man"]), 1)
 
     def test_rejects_unknown_class_with_suggestion(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "did you mean Dog"):
-                _ = self.source(Path(directory), classes=["Dgo"])
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, "did you mean Dog"),
+        ):
+            _ = self.source(Path(directory), classes=["Dgo"])
 
     def test_caption_drops_qualifier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

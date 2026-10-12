@@ -4,3 +4,4 @@ __pycache__/
 /downloaded-data/
 .DS_Store
 /scene-data/
+/checkpoints/

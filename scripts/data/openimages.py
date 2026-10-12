@@ -241,7 +241,7 @@ class OpenImagesSource:
                 found[caption].append((split, image_id, box))
 
         for split in self.splits:
-            images, boxes, vrd = SPLITS[split]
+            _images, boxes, vrd = SPLITS[split]
             if wanted:
                 for row in self._rows(boxes):
                     caption = wanted.get(row["LabelName"])
