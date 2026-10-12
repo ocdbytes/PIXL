@@ -1,18 +1,22 @@
-"""Sets up the training data in three steps.
+"""Rebuilds the training dataset from its sources, for changing the dataset.
 
-1. Get the photo pairs and sprites, from one of two sources (--source):
-   - hub (default): pull them from the public Hugging Face dataset repo
-     (scripts.hub.sync). Takes minutes; skips data that is already on disk.
-   - build: download photo pairs from Open Images, Wikimedia and Openverse for
-     the queries in src/queries.json (scripts.data.build). Takes 1-2 days and
-     resumes if stopped. Sprites must already be in downloaded-data.
+Training does not need this: src/data.py loads the dataset from Hugging Face.
+Run it after changing the queries, sprite packs or labels:
+
+1. Download photo pairs from Open Images, Wikimedia and Openverse for the
+   queries in src/queries.json (scripts.data.build). Takes 1-2 days the first
+   time and resumes if stopped. Sprites must already be in downloaded-data.
 2. Label sprites that have no label yet, keeping existing labels, and gather
    every sprite into one folder (scripts.labeler.label).
 3. Drop photo pairs with nudity or graphic content, web photos that do not
-   match their query, and CC BY photos that cannot be credited, and write
-   clean.csv next to the photos (scripts.refine.clip_filter).
+   match their query, and CC BY photos that cannot be credited; write
+   clean.csv and review sheets of the content drops (scripts.refine.clip_filter).
+4. Build captioned 32x32 scenes from the sprites, with review sheets of the
+   sprite roles and sample scenes (scripts.scenes.generate).
 
 Each step runs as its own process, so one step's model is freed before the next.
+Uploading stays a separate, manual step: every push is public at once, so check
+the review sheets first, then run scripts.hub.sync push.
 """
 
 from __future__ import annotations
@@ -25,13 +29,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 QUERIES = Path("src/queries.json")
-# Built by hand from the downloaded sprite packs; the build source does not fetch them.
+# Built by hand from the downloaded sprite packs; the download step does not fetch them.
 SPRITES = Path("downloaded-data/manifest.csv")
 
 
 @dataclass
 class Args(argparse.Namespace):
-    source: str = "hub"
     user_agent: str = ""
     label_model: str = "clip"
 
@@ -56,14 +59,9 @@ def parse_args() -> Args:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     _ = parser.add_argument(
-        "--source",
-        choices=("hub", "build"),
-        default=Args.source,
-        help="where step 1 gets the data",
-    )
-    _ = parser.add_argument(
         "--user-agent",
-        help='needed with --source build: descriptive agent with contact, e.g. "PixlDataset/0.1 (you@example.com)"',
+        required=True,
+        help='descriptive agent with contact, e.g. "PixlDataset/0.1 (you@example.com)"',
     )
     _ = parser.add_argument(
         "--label-model",
@@ -71,33 +69,26 @@ def parse_args() -> Args:
         default=Args.label_model,
         help="model for sprites that have no label yet",
     )
-    args = parser.parse_args(namespace=Args())
-    if args.source == "build" and not args.user_agent:
-        parser.error("--source build needs --user-agent")
-    return args
+    return parser.parse_args(namespace=Args())
 
 
 def main() -> None:
     args = parse_args()
+    # Checked first: the download alone takes over a day.
+    if not SPRITES.exists():
+        raise SystemExit(
+            f"{SPRITES} not found: add the sprite packs, or get the current ones"
+            " with `uv run python -m scripts.hub.sync pull`"
+        )
     output = json.loads(QUERIES.read_text(encoding="utf-8"))["output"]
 
-    if args.source == "hub":
-        run("scripts.hub.sync", "pull")
-    else:
-        # Checked first: the build alone takes over a day.
-        if not SPRITES.exists():
-            raise SystemExit(f"{SPRITES} not found: add the sprite packs first")
-        run(
-            "scripts.data.build",
-            "--config",
-            str(QUERIES),
-            "--user-agent",
-            args.user_agent,
-        )
+    run("scripts.data.build", "--config", str(QUERIES), "--user-agent", args.user_agent)
     run("scripts.labeler.label", "--model", args.label_model)
-    run("scripts.refine.clip_filter", "--data", output)
+    run("scripts.refine.clip_filter", "--data", output, "--sheets")
+    run("scripts.scenes.generate", "--sheets")
     print(
-        f"\nDone: photo pairs in {output}/clean.csv, sprites in downloaded-data/labeled"
+        f"\nDone. Check the review sheets in {output}/review/ and scene-data/review/,"
+        " then upload with `uv run python -m scripts.hub.sync push`."
     )
 
 

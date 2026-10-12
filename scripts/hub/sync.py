@@ -35,25 +35,28 @@ QUERIES = Path("src/queries.json")
 CARD = Path("scripts/hub/card.md")
 
 
-@dataclass(frozen=True)
-class Part:
-    """One local manifest and the image files it points to.
+Split = Callable[[dict[str, str]], str]
 
-    Attributes:
-        name: Config name in the dataset repo.
-        root: Folder holding manifest.csv; manifest paths are relative to it.
-        images: Image column in the repo -> manifest column with the file path.
+
+def hashed_split(group: Callable[[dict[str, str]], str], test_share: float) -> Split:
+    """Makes a split function that keeps each group of rows in one split.
+
+    Args:
         group: Returns a row's group key; rows with the same key share a split.
         test_share: Fraction of groups in the test split.
-        upload: CSV in root whose rows are pushed; pulls write manifest.csv.
+
+    Returns:
+        A function that returns "test" for a row if the first 8 hex digits of
+        the SHA-256 of its group key, as a fraction of 16**8, are below
+        test_share, and "train" otherwise. It depends only on the key, so the
+        split never changes and new rows never move old ones.
     """
 
-    name: str
-    root: Path
-    images: dict[str, str]
-    group: Callable[[dict[str, str]], str]
-    test_share: float
-    upload: str = "manifest.csv"
+    def split(row: dict[str, str]) -> str:
+        digest = hashlib.sha256(group(row).encode()).hexdigest()
+        return "test" if int(digest[:8], 16) / 16**8 < test_share else "train"
+
+    return split
 
 
 def sprite_group(row: dict[str, str]) -> str:
@@ -72,69 +75,77 @@ def sprite_group(row: dict[str, str]) -> str:
     return f"{row['pack']}/{Path(row['path']).name}"
 
 
+@dataclass(frozen=True)
+class Part:
+    """One local manifest and the image files it points to.
+
+    Attributes:
+        name: Config name in the dataset repo.
+        root: Folder holding manifest.csv; manifest paths are relative to it.
+        images: Image column in the repo -> manifest column with the file path.
+        split: Returns the split ("train" or "test") of a manifest row.
+        upload: CSV in root whose rows are pushed; pulls write manifest.csv.
+    """
+
+    name: str
+    root: Path
+    images: dict[str, str]
+    split: Split
+    upload: str = "manifest.csv"
+
+
 PARTS = (
     Part(
         "photos",
         Path("pixel-image-data"),
         {"input": "input_path", "target": "target_path"},
-        group=lambda row: row["sha256"],  # all crops of one source photo
-        test_share=0.02,
+        # All crops of one source photo share a split.
+        split=hashed_split(lambda row: row["sha256"], test_share=0.02),
         upload="clean.csv",
     ),
     Part(
         "sprites",
         Path("downloaded-data"),
         {"image": "path"},
-        group=sprite_group,
-        test_share=0.1,
+        split=hashed_split(sprite_group, test_share=0.1),
+    ),
+    # Scenes are built from train or test sprites, so the generator sets the split.
+    Part(
+        "scenes", Path("scene-data"), {"image": "path"}, split=lambda row: row["split"]
     ),
 )
-
-
-def split(part: Part, row: dict[str, str]) -> str:
-    """Names the split a manifest row belongs to.
-
-    Args:
-        part: The row's part.
-        row: Manifest row.
-
-    Returns:
-        "test" if the first 8 hex digits of the SHA-256 of the row's group key,
-        as a fraction of 16**8, are below part.test_share; otherwise "train".
-    """
-    digest = hashlib.sha256(part.group(row).encode()).hexdigest()
-    return "test" if int(digest[:8], 16) / 16**8 < part.test_share else "train"
+PART = {part.name: part for part in PARTS}
 
 
 @dataclass
 class Args(argparse.Namespace):
     command: str = ""
     repo: str = REPO
+    only: list[str] | None = None
 
 
-def push(repo: str) -> None:
-    """Uploads every part, replacing what the repo held before.
+def push(repo: str, parts: list[Part]) -> None:
+    """Uploads parts, replacing what the repo held for them before.
 
     Args:
         repo: Dataset repo id; created as private if it does not exist.
+        parts: Parts to upload.
 
     Raises:
         SystemExit: If a part's upload CSV is missing, e.g. refine has not run.
     """
-    for part in PARTS:
+    for part in parts:
         upload = part.root.joinpath(part.upload)
         if not upload.exists():
-            raise SystemExit(
-                f"{upload} not found: run scripts.refine.clip_filter first"
-            )
-    for part in PARTS:
+            raise SystemExit(f"{upload} not found: run src.setup_data to build it")
+    for part in parts:
         with part.root.joinpath(part.upload).open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
             fields = reader.fieldnames or []
             rows = list(reader)
         splits = DatasetDict()
         for name in ("train", "test"):
-            chosen = [row for row in rows if split(part, row) == name]
+            chosen = [row for row in rows if part.split(row) == name]
             columns = {field: [row[field] for row in chosen] for field in fields}
             for image, path_column in part.images.items():
                 columns[image] = [
@@ -174,8 +185,8 @@ def push_card(repo: str) -> None:
     _ = card.push_to_hub(repo, repo_type="dataset")
 
 
-def pull(repo: str) -> None:
-    """Writes every part's images and manifest back to their local folders.
+def pull(repo: str, parts: list[Part]) -> None:
+    """Writes parts' images and manifests back to their local folders.
 
     A part whose manifest already exists is skipped, so local data is never
     overwritten. Both splits go into one manifest, train rows first. The manifest
@@ -184,8 +195,9 @@ def pull(repo: str) -> None:
 
     Args:
         repo: Dataset repo id.
+        parts: Parts to download.
     """
-    for part in PARTS:
+    for part in parts:
         manifest = part.root.joinpath("manifest.csv")
         if manifest.exists():
             print(f"{manifest} exists; skipping {part.name} (delete it to pull again)")
@@ -217,17 +229,24 @@ def parse_args() -> Args:
         "command", choices=("push", "pull", "card"), help="card: push only the card"
     )
     _ = parser.add_argument("--repo", default=Args.repo)
+    _ = parser.add_argument(
+        "--only",
+        nargs="+",
+        choices=list(PART),
+        help="push or pull only these configs, e.g. --only scenes",
+    )
     return parser.parse_args(namespace=Args())
 
 
 def main() -> None:
     args = parse_args()
+    parts = [PART[name] for name in args.only] if args.only else list(PARTS)
     if args.command == "push":
-        push(args.repo)
+        push(args.repo, parts)
     elif args.command == "card":
         push_card(args.repo)
     else:
-        pull(args.repo)
+        pull(args.repo, parts)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 |---|---|---|---|
 | `photos` | `pixel-image-data/clean.csv` | One per photo pair that [refine](../refine/README.md) kept | `input` (256×256 JPEG), `target` (32×32 PNG) |
 | `sprites` | `downloaded-data/manifest.csv` | One per sprite | `image` (PNG) |
+| `scenes` | `scene-data/manifest.csv` | One per scene built by [scenes](../scenes/README.md) | `image` (32×32 PNG) |
 
 Every manifest column is kept as text, including captions, labels, authors, licences and source URLs. Images are stored as their original file bytes in Parquet files, so a pull writes back exactly the files that were pushed. `queries.json` is uploaded as a record of the queries that built the photos.
 
@@ -15,12 +16,13 @@ Every manifest column is kept as text, including captions, labels, authors, lice
 
 Each config has a `train` and a `test` split. Splitting by row would put near-copies in both splits, so rows are split by group:
 
-| Config | Group key (`Part.group`) | Test share | train / test rows |
+| Config | Split rule (`Part.split`) | Test share | train / test rows |
 |---|---|---|---|
 | `photos` | `sha256` of the source photo, so all crops of one photo stay together | 2% | 82,651 / 1,639 |
 | `sprites` | `sprite_group`: animation frames without their number (`cherry-3` → `cherry`); other sprites by pack and file name, so the 4 colour variants of a 1-Bit Pack tile stay together | 10% | 5,144 / 541 |
+| `scenes` | The manifest's `split` column, set by the generator from the sprites each scene uses | — | 50,000 / 2,000 |
 
-`split(part, row)` puts a row in `test` when the first 8 hex digits of the SHA-256 of its group key, as a fraction of 16⁸, are below the test share. The result depends only on the key, so the split never changes between runs and new data never moves existing rows. Training code should call the same function to split local data the same way.
+For photos and sprites, `hashed_split(group, test_share)` puts a row in `test` when the first 8 hex digits of the SHA-256 of its group key, as a fraction of 16⁸, are below the test share. The result depends only on the key, so the split never changes between runs and new data never moves existing rows. Code that splits local data should call the same `PART[name].split(row)`.
 
 All 73 Buch sprites are frames of one sprite sheet (`characters_0000` …), so they form one group and are all in `train`.
 
@@ -44,9 +46,10 @@ From the project root:
 uv run python -m scripts.hub.sync push   # upload local data, replacing the repo's copy
 uv run python -m scripts.hub.sync pull   # download into pixel-image-data/ and downloaded-data/
 uv run python -m scripts.hub.sync card   # upload only the dataset card (card.md)
+uv run python -m scripts.hub.sync push --only scenes   # upload one config (also works for pull)
 ```
 
-`pull` is step 1 of [`src/setup_data.py`](../../src/setup_data.py) by default.
+Training does not need `pull`: [`src/data.py`](../../src/data.py) loads the dataset from the Hub directly. `pull` gives an editable local copy, for example to start [changing the dataset](../../README.md#change-the-dataset) on another machine.
 
 - **Pull never overwrites:** a part whose `manifest.csv` already exists is skipped. Delete the manifest to pull that part again.
 - **Interrupted pull:** the manifest is written after all images, so rerunning `pull` starts that part again.
@@ -54,4 +57,4 @@ uv run python -m scripts.hub.sync card   # upload only the dataset card (card.md
 - **After changing local data** (a new build, new sprite packs or new labels), run refine and then `push` so the repo matches. `push` stops if `clean.csv` is missing.
 - **A pull writes `clean.csv` rows as `manifest.csv`**, so pulled photo data holds only the kept pairs.
 
-`clean.csv` and `clip_scores.csv` are not uploaded; setup's refine step rebuilds them.
+Only the rows of `clean.csv` are uploaded; refine's other outputs (`dropped.csv`, `clip_embeddings.pt`, `review/`) stay local.

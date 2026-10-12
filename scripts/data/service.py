@@ -85,6 +85,9 @@ def make_pair(
         pixel = pixel.quantize(colors=colors, method=Image.Quantize.MEDIANCUT).convert(
             "RGB"
         )
+    # The photo's colour profile would be copied into the PNG: it can be larger
+    # than Pillow will read back, and all later steps use raw pixel values anyway.
+    _ = pixel.info.pop("icc_profile", None)
     return normal, pixel
 
 

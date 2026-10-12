@@ -23,6 +23,7 @@ Training data for **pixl**, a small text-to-pixel-art model trained from scratch
 |---|---|---|
 | `photos` | ~84k | Photo pairs: a 256×256 photo (`input`), a 32×32, 24-colour version of it (`target`), and a caption (`query`) |
 | `sprites` | ~5.7k | CC0 game sprites (`image`) with a short label (`label`) |
+| `scenes` | 52k | 32×32 scenes built from the sprites (`image`), with a caption written from the placement (`caption`) |
 
 ## Load
 
@@ -31,6 +32,7 @@ from datasets import load_dataset
 
 photos = load_dataset("ocdbytes/pixl-data", "photos")    # {"train": ..., "test": ...}
 sprites = load_dataset("ocdbytes/pixl-data", "sprites")
+scenes = load_dataset("ocdbytes/pixl-data", "scenes")
 
 train = load_dataset("ocdbytes/pixl-data", "photos", split="train")  # one split only
 ```
@@ -41,6 +43,7 @@ train = load_dataset("ocdbytes/pixl-data", "photos", split="train")  # one split
 |---|---|---|---|
 | `photos` | ~82.7k | ~1.6k (2% of source photos) | All crops of one source photo (same `sha256`) |
 | `sprites` | ~5.1k | ~540 (10% of groups) | The colour variants of one tile, and the frames of one animation |
+| `scenes` | 50,000 | 2,000 | Set by the generator: test scenes use test sprites, or object pairs never seen in train scenes |
 
 Near-copies never appear in both splits, so test scores are not inflated by images the model has already seen. A group is in `test` when the first 8 hex digits of the SHA-256 of its key, as a fraction of 16⁸, are below 0.02 (photos) or 0.1 (sprites). The split is fixed: new data never moves existing rows.
 
@@ -89,11 +92,31 @@ Sprites from CC0 packs by [Kenney](https://kenney.nl/assets) (1-Bit Pack, Cursor
 | `label`, `label_source` | Label and where it comes from |
 | `image` | The sprite (PNG, with transparency) |
 
+## scenes
+
+Synthetic 32×32 scenes, each made from one sprite style: a background tile repeated in every 16 px slot (8 px for Pico-8 City) and one or two objects, each centred in its own slot. Sprites are never scaled. The caption is written from the placement, so it is always right: "a green pine tree left of a wooden barrel on grass", "a yellow bus at the top right on pavement".
+
+| Kind (`kind`) | Split | Scenes | Objects from |
+|---|---|---|---|
+| `train` | train | 50,000 | Train-split sprites |
+| `new sprites` | test | 1,000 | Test-split sprites only |
+| `new pair` | test | 1,000 | Train-split sprites in label pairs that never appear together in train scenes |
+
+| Column | Meaning |
+|---|---|
+| `caption` | The scene's caption |
+| `kind` | See above |
+| `style` | Sprite pack (or 1-Bit Pack colour family) the scene is made from |
+| `background`, `background_path` | Background tile label and path in the `sprites` config; empty for a transparent scene |
+| `objects`, `sprites`, `slots` | Each object's label, path and `row,column` slot, `\|`-separated |
+| `image` | The scene (PNG, transparent where there is no background) |
+
 ## Licences
 
 Every row has its own licence in `license` (and `license_url` for photos):
 
 - **Sprites:** CC0 1.0.
+- **Scenes:** CC0 1.0, as they are made only from the sprites.
 - **Photos:** CC0, public domain, or CC BY 1.0–4.0. All Open Images photos are listed as CC BY 2.0.
 - **Open Images annotations** (the boxes and labels behind the crops and captions): CC BY 4.0, by Google.
 

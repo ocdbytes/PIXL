@@ -17,7 +17,7 @@ Three sources are used:
 
 ## Build from the query file
 
-`build.py` is step 1 of [`src/setup_data.py`](../../src/setup_data.py) when it runs with `--source build`; by default setup pulls the finished pairs from the Hugging Face dataset repo instead (see [`scripts/hub`](../hub/README.md)). To run only the download, call it directly. It reads [`src/queries.json`](../../src/queries.json), runs Open Images first, then the web sources:
+`build.py` is step 1 of [`src/setup_data.py`](../../src/setup_data.py), which rebuilds the dataset when it changes; training loads the finished dataset from Hugging Face instead. To run only the download, call it directly. It reads [`src/queries.json`](../../src/queries.json), runs Open Images first, then the web sources:
 
 ```bash
 uv run python -m scripts.data.build --user-agent "PixlDataset/0.1 (your-email@example.com)"

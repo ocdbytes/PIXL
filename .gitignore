@@ -3,3 +3,4 @@ __pycache__/
 /pixel-image-data/
 /downloaded-data/
 .DS_Store
+/scene-data/
