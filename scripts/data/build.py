@@ -47,7 +47,7 @@ class Config(TypedDict, total=False):
 
 @dataclass
 class Args(argparse.Namespace):
-    config: Path = Path("scripts/data/queries.json")
+    config: Path = Path("src/queries.json")
     user_agent: str = ""
     only: str | None = None
 

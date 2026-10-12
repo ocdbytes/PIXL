@@ -11,7 +11,7 @@ Models are downloaded to the Hugging Face cache on first run. Pick one with `--m
 
 ## Run
 
-From the project root:
+This is step 2 of [`src/setup_data.py`](../../src/setup_data.py), which passes its `--label-model` here as `--model`. To run it alone, from the project root:
 
 ```bash
 uv run python -m scripts.labeler.label                    # CLIP

@@ -8,7 +8,7 @@ from scripts.data.build import flatten, load_config
 @final
 class BuildConfigTest(unittest.TestCase):
     def test_shipped_queries_file_is_valid(self) -> None:
-        config = load_config(Path("scripts/data/queries.json"))
+        config = load_config(Path("src/queries.json"))
         self.assertIn("open_images", config)
         self.assertIn("web", config)
 

@@ -17,7 +17,7 @@ Three sources are used:
 
 ## Build from the query file
 
-`build.py` is the main entry point. It reads [`queries.json`](queries.json), runs Open Images first, then the web sources:
+`build.py` is step 1 of [`src/setup_data.py`](../../src/setup_data.py) when it runs with `--source build`; by default setup pulls the finished pairs from the Hugging Face dataset repo instead (see [`scripts/hub`](../hub/README.md)). To run only the download, call it directly. It reads [`src/queries.json`](../../src/queries.json), runs Open Images first, then the web sources:
 
 ```bash
 uv run python -m scripts.data.build --user-agent "PixlDataset/0.1 (your-email@example.com)"
@@ -27,7 +27,7 @@ Add `--only open_images` or `--only web` to run one section, and `--config other
 
 Every run resumes. `per_query` is a total per source and query, so rerunning skips queries that already have enough pairs.
 
-### `queries.json`
+### `src/queries.json`
 
 ```jsonc
 {
