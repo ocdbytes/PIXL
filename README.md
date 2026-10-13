@@ -2,7 +2,7 @@
 
 Pixl is a text-to-pixel-art model. It represents 32×32 images with a shared 256-token colour palette and generates them one pixel at a time with a decoder-only Transformer.
 
-Stage 1 photo pretraining, the datasets, tokenizers, and model are ready. Later training stages are not yet implemented.
+Stage 1 (photo pretraining) and stage 2 (fine-tuning on sprites and scenes) are ready, with the datasets, tokenizers, and model. Stage 3 (reinforcement learning) is not yet implemented.
 
 ## Setup and train
 
@@ -10,13 +10,13 @@ Stage 1 photo pretraining, the datasets, tokenizers, and model are ready. Later 
 uv sync
 ```
 
-Open [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) in VS Code with the project's `.venv` kernel, or start Jupyter:
+Open [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) (stage 1), then [`notebooks/clip-finetune.ipynb`](notebooks/clip-finetune.ipynb) (stage 2), in VS Code with the project's `.venv` kernel, or start Jupyter:
 
 ```bash
 uv run --with jupyter jupyter lab
 ```
 
-The notebook loads the public [`ocdbytes/pixl-data`](https://huggingface.co/datasets/ocdbytes/pixl-data) dataset automatically. The first photo load downloads about 2.4 GB. Three epochs take about 3.5 hours on the measured Apple-silicon GPU; checkpoints are written to `checkpoints/`. Set `QUICK = True` for a short smoke test.
+The notebooks load the public [`ocdbytes/pixl-data`](https://huggingface.co/datasets/ocdbytes/pixl-data) dataset automatically. The first photo load downloads about 2.4 GB. On the measured Apple-silicon GPU, stage 1 (three epochs) takes about 3.5 hours and stage 2 (8,000 steps) about 2.3 hours; checkpoints are written to `checkpoints/`. Set `QUICK = True` for a short smoke test.
 
 See [`src/README.md`](src/README.md) for the palette, caption tokenizer, data loader, model architecture, and training details.
 
@@ -26,6 +26,7 @@ See [`src/README.md`](src/README.md) for the palette, caption tokenizer, data lo
 |---|---|
 | [`src/`](src/README.md) | Palette and caption tokenizers, data loader, model, and data setup |
 | [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) | Stage 1 photo pretraining |
+| [`notebooks/clip-finetune.ipynb`](notebooks/clip-finetune.ipynb) | Stage 2 fine-tuning on sprites and scenes, with captions read by frozen CLIP |
 | [`misc/retro.py`](misc/retro.py) | Training displays |
 | [`scripts/data/`](scripts/data/README.md) | Download and build aligned photo/pixel-art pairs |
 | [`scripts/labeler/`](scripts/labeler/README.md) | Label and gather sprite assets |

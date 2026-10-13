@@ -6,8 +6,8 @@ so pixel size and look stay consistent:
 1. A background tile from BACKGROUNDS fills every slot. Styles without one use a
    transparent canvas.
 2. One or two objects go into slots: 16 px slots (2x2) for most packs, 8 px slots
-   (4x4) for Pico-8 City. Sprites are never scaled; two objects share a row or a
-   column.
+   (4x4) for Pico-8 City. Sprites are not scaled, except those of the 32 px packs
+   in HALVED, which are halved; two objects share a row or a column.
 3. The caption is written from the placement, e.g. "a pine tree at the top left
    on grass" or "a pine tree left of a red house on grass".
 
@@ -69,6 +69,27 @@ BACKGROUNDS = {
     "water": "water",
     "water center": "water",
     "water with sparkles": "water",
+    "sea water": "water",
+    "sea water with ripples": "water",
+    "shallow water": "shallow water",
+    "brown dirt ground": "dirt",
+    "dark dungeon floor": "a dark dungeon floor",
+    "sand floor with pebbles": "a sandy floor",
+    "grass floor": "grass",
+    "grass flowers blue floor": "grass with flowers",
+    "grass flowers red floor": "grass with flowers",
+    "grass flowers yellow floor": "grass with flowers",
+    "dirt floor": "dirt",
+    "pebble brown floor": "pebbly dirt",
+    "sand floor": "sand",
+    "shoals shallow water": "shallow water",
+    "shoals deep water": "water",
+    "marble floor": "a marble floor",
+    "white marble floor": "a marble floor",
+    "limestone floor": "a stone floor",
+    "ice floor": "ice",
+    "frozen floor": "ice",
+    "lava floor": "lava",
     "pavement": "pavement",
     "cracked pavement": "cracked pavement",
     "road": "a road",
@@ -86,10 +107,15 @@ FRAGMENT = re.compile(
     r"|middle|center|slope|ridge|gable|junction|crossing|crossroad|intersection"
     r"|bend|straight|vertical|horizontal|shore|shoreline|curve|marking"
     r"|roof|dormer|window|door|doorway|wall|facade|awning|chimney|battlement"
-    r"|portcullis|arch|pavement)\b"
+    r"|portcullis|arch|pavement"
+    r"|north|south|east|west|northeast|northwest|southeast|southwest)\b"
 )
 # Share of object pairs kept out of train scenes for the "new pair" test.
 HELD_OUT = 0.05
+# Packs drawn at 32 px; their sprites are halved, keeping every other pixel, to fit 16 px slots.
+HALVED = {"dcss_dungeon-crawl-32x32"}
+# A halved object is only placed when its largest connected piece holds this share of its pixels.
+WHOLE = 0.8
 
 
 @dataclass
@@ -103,7 +129,7 @@ class Sprite:
 
 @dataclass
 class Args(argparse.Namespace):
-    train: int = 50_000
+    train: int = 100_000
     test: int = 2_000
     sheets: bool = False
 
@@ -128,6 +154,14 @@ def slot_size(style: str) -> int:
     return 8 if style == "kenney_pico-8-city" else 16
 
 
+def ground(label: str) -> str | None:
+    """The caption name of a background label, or None when it is not a background.
+
+    Monochrome tiles ("monochrome grass") are named like their coloured versions.
+    """
+    return BACKGROUNDS.get(label.removeprefix("monochrome "))
+
+
 def role(image: Image.Image, label: str, slot: int) -> str:
     """Decides how a sprite may be used in scenes.
 
@@ -143,15 +177,50 @@ def role(image: Image.Image, label: str, slot: int) -> str:
     """
     opaque = np.asarray(image)[..., 3] >= 128
     if image.size == (slot, slot) and opaque.all():
-        return "background" if label in BACKGROUNDS else ""
+        return "background" if ground(label) else ""
     fits = max(image.size) <= slot and 0.05 <= opaque.mean() and not opaque.all()
-    if fits and label not in BACKGROUNDS and not FRAGMENT.search(label):
+    if fits and not ground(label) and not FRAGMENT.search(label):
         return "object"
     return ""
 
 
+def whole(image: Image.Image) -> bool:
+    """Tells whether a sprite's opaque pixels mostly form one piece.
+
+    Halving breaks thin outlines apart; such sprites are not placed.
+
+    Args:
+        image: RGBA sprite.
+
+    Returns:
+        True when the largest 8-connected piece holds at least WHOLE of the opaque pixels.
+    """
+    opaque = np.asarray(image)[..., 3] >= 128
+    height, width = opaque.shape
+    seen = np.zeros_like(opaque)
+    largest = 0
+    for start in zip(*np.nonzero(opaque)):
+        if seen[start]:
+            continue
+        seen[start] = True
+        stack, size = [start], 0
+        while stack:
+            y, x = stack.pop()
+            size += 1
+            for ny in range(max(y - 1, 0), min(y + 2, height)):
+                for nx in range(max(x - 1, 0), min(x + 2, width)):
+                    if opaque[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+        largest = max(largest, size)
+    return largest >= WHOLE * opaque.sum()
+
+
 def load_sprites() -> dict[str, list[Sprite]]:
     """Reads the local sprites and sorts them by role.
+
+    Only CC0 sprites are used, so scenes stay CC0. Sprites of HALVED packs are halved
+    first; halved objects that fall apart are dropped.
 
     Returns:
         "background" and "object" -> sprites with that role.
@@ -161,10 +230,18 @@ def load_sprites() -> dict[str, list[Sprite]]:
         rows = list(csv.DictReader(file))
     roles: dict[str, list[Sprite]] = defaultdict(list)
     for row in rows:
+        if not row["license"].startswith("CC0"):
+            continue
         with Image.open(SPRITES.joinpath(row["path"])) as image:
             rgba = image.convert("RGBA")
         style = style_of(row)
+        if style in HALVED:
+            rgba = rgba.resize(
+                (rgba.width // 2, rgba.height // 2), Image.Resampling.NEAREST
+            )
         kind = role(rgba, row["label"], slot_size(style))
+        if kind == "object" and style in HALVED and not whole(rgba):
+            continue
         if kind:
             sprite = Sprite(row["path"], row["label"], style, sprites.split(row), rgba)
             roles[kind].append(sprite)
@@ -316,7 +393,7 @@ def make_scenes(
             "split": "train" if kind == "train" else "test",
             "kind": kind,
             "caption": caption(
-                placed, BACKGROUNDS[background.label] if background else "", grid
+                placed, ground(background.label) or "" if background else "", grid
             ),
             "style": style,
             "background": background.label if background else "",

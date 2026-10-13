@@ -10,7 +10,7 @@ These scenes teach the model spatial composition and retain placement metadata f
 
 | Split | Kind | Default count | Purpose |
 |---|---|---:|---|
-| train | `train` | 50,000 | Train-split sprites and known object pairs |
+| train | `train` | 100,000 | Train-split sprites and known object pairs |
 | test | `new sprites` | 1,000 | Sprites not used in training |
 | test | `new pair` | 1,000 | Known sprites in object pairs excluded from training |
 
@@ -26,7 +26,7 @@ Each scene uses one sprite style so scale and appearance remain consistent. The 
 4. Rejects scenes where less than half of an object's visible pixels differ from the background.
 5. Writes a caption such as `at the top left`, `left of`, or `above`.
 
-Objects are never scaled. A scene ID is derived from its style, background, objects, and positions, preventing duplicates. Fixed random seeds make repeated runs deterministic.
+Objects are not scaled, except the 32 px Dungeon Crawl sprites (`HALVED`), which are halved by keeping every other pixel; a halved object is skipped when its largest connected piece holds less than 80% of its pixels (`WHOLE`). A scene ID is derived from its style, background, objects, and positions, preventing duplicates. Fixed random seeds make repeated runs deterministic.
 
 Sprites are eligible as objects when they are transparent, fit one slot, contain enough visible pixels, and are not terrain fragments. Fully opaque terrain tiles can be backgrounds. Use `--sheets` to review sprite roles and generated scenes.
 
@@ -40,7 +40,7 @@ uv run python -m scripts.scenes.generate --sheets
 uv run python -m scripts.scenes.generate --train 100000 --test 4000
 ```
 
-Generation requires `downloaded-data/` and takes about 15 seconds with the defaults.
+Generation requires `downloaded-data/` and takes about 30 seconds with the defaults. Only CC0 sprites are used, so scenes stay CC0; monochrome ground tiles ("monochrome grass") count as backgrounds like their coloured versions.
 
 ## Outputs
 

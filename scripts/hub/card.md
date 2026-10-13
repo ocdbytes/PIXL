@@ -22,8 +22,8 @@ Training data for **pixl**, a small text-to-pixel-art model trained from scratch
 | Config | Rows | What it holds |
 |---|---|---|
 | `photos` | ~84k | Photo pairs: a 256×256 photo (`input`), a 32×32, 24-colour version of it (`target`), and a caption (`query`) |
-| `sprites` | ~5.7k | CC0 game sprites (`image`) with a short label (`label`) |
-| `scenes` | 52k | 32×32 scenes built from the sprites (`image`), with a caption written from the placement (`caption`) |
+| `sprites` | ~11.3k | Game sprites and icons (`image`) with a short label (`label`) |
+| `scenes` | 102k | 32×32 scenes built from the sprites (`image`), with a caption written from the placement (`caption`) |
 
 ## Load
 
@@ -42,8 +42,8 @@ train = load_dataset("ocdbytes/pixl-data", "photos", split="train")  # one split
 | Config | train | test | Kept together in one split |
 |---|---|---|---|
 | `photos` | ~82.7k | ~1.6k (2% of source photos) | All crops of one source photo (same `sha256`) |
-| `sprites` | ~5.1k | ~540 (10% of groups) | The colour variants of one tile, and the frames of one animation |
-| `scenes` | 50,000 | 2,000 | Set by the generator: test scenes use test sprites, or object pairs never seen in train scenes |
+| `sprites` | ~10.2k | ~1.1k (10% of groups) | The colour variants of one tile, the frames of one animation, and the numbered and old/new versions of one Dungeon Crawl sprite |
+| `scenes` | 100,000 | 2,000 | Set by the generator: test scenes use test sprites, or object pairs never seen in train scenes |
 
 Near-copies never appear in both splits, so test scores are not inflated by images the model has already seen. A group is in `test` when the first 8 hex digits of the SHA-256 of its key, as a fraction of 16⁸, are below 0.02 (photos) or 0.1 (sprites). The split is fixed: new data never moves existing rows.
 
@@ -81,7 +81,11 @@ Every photo was changed:
 
 ## sprites
 
-Sprites from CC0 packs by [Kenney](https://kenney.nl/assets) (1-Bit Pack, Cursor Pixel Pack, Pico-8 City, Tiny Battle, Tiny Farm, Tiny Town), [ansimuz](https://ansimuz.itch.io/sunny-land-pixel-game-art) (Sunny Land), [GrafxKid](https://grafxkid.itch.io/mini-pixel-pack-3) (Mini Pixel Pack 3) and [Buch](https://opengameart.org/content/a-platformer-in-the-forest) (A Platformer in the Forest). `label_source` says where each label comes from: checked by eye (`claude-visual`), a file name (`filename`) or a sprite-sheet atlas (`atlas`).
+Sprites from CC0 packs by [Kenney](https://kenney.nl/assets) (1-Bit Pack, Cursor Pixel Pack, Monochrome Pirates, Pico-8 City, Pixel Shmup, Pixel Vehicle Pack, Tiny Battle, Tiny Dungeon, Tiny Farm, Tiny Town), [ansimuz](https://ansimuz.itch.io/sunny-land-pixel-game-art) (Sunny Land), [GrafxKid](https://grafxkid.itch.io/mini-pixel-pack-3) (Mini Pixel Pack 3), [Buch](https://opengameart.org/content/a-platformer-in-the-forest) (A Platformer in the Forest), the Dungeon Crawl Stone Soup artists ([Dungeon Crawl 32x32 tiles](https://opengameart.org/content/dungeon-crawl-32x32-tiles-supplemental)), [Idylwild](https://opengameart.org/content/idylwilds-inventory) (Idylwild's Inventory), [Scrittl](https://opengameart.org/content/spaceship-set-32x32px) (Spaceship set 32x32px), [Jull](https://opengameart.org/node/50777) (Animated spaceships) and [wender](https://opengameart.org/node/176168) (Sports cars pixelart sprites). `label_source` says where each label comes from: checked by eye (`claude-visual`), a file name (`filename`) or a sprite-sheet atlas (`atlas`).
+
+Icons by the [game-icons.net](https://game-icons.net) contributors (the row's `creator`, e.g. Lorc or Delapouite), available on https://game-icons.net under CC BY 3.0, rendered as white silhouettes 30×30 pixels in size on a 32×32 transparent canvas. Each row's `source_url` is the icon's page. Icons with abstract names, or about gore, drugs, self-harm or nudity, were left out.
+
+Monochrome sprites (the 1-Bit Pack's white tiles, the Cursor Pixel Pack, Monochrome Pirates and the icons) have labels starting with "monochrome", without the colour words of their coloured versions, so a caption tells colour and monochrome apart. The 1-Bit Pack's copies of objects on a dark square are left out; its ground tiles keep theirs.
 
 | Column | Meaning |
 |---|---|
@@ -94,11 +98,11 @@ Sprites from CC0 packs by [Kenney](https://kenney.nl/assets) (1-Bit Pack, Cursor
 
 ## scenes
 
-Synthetic 32×32 scenes, each made from one sprite style: a background tile repeated in every 16 px slot (8 px for Pico-8 City) and one or two objects, each centred in its own slot. Sprites are never scaled. The caption is written from the placement, so it is always right: "a green pine tree left of a wooden barrel on grass", "a yellow bus at the top right on pavement".
+Synthetic 32×32 scenes, each made from one sprite style: a background tile repeated in every 16 px slot (8 px for Pico-8 City) and one or two objects, each centred in its own slot. Sprites are not scaled, except the 32×32 Dungeon Crawl tiles, which are halved to 16×16 by keeping every other pixel; halved objects that fall apart into pieces are left out. The caption is written from the placement, so it is always right: "a green pine tree left of a wooden barrel on grass", "a yellow bus at the top right on pavement".
 
 | Kind (`kind`) | Split | Scenes | Objects from |
 |---|---|---|---|
-| `train` | train | 50,000 | Train-split sprites |
+| `train` | train | 100,000 | Train-split sprites |
 | `new sprites` | test | 1,000 | Test-split sprites only |
 | `new pair` | test | 1,000 | Train-split sprites in label pairs that never appear together in train scenes |
 
@@ -115,7 +119,7 @@ Synthetic 32×32 scenes, each made from one sprite style: a background tile repe
 
 Every row has its own licence in `license` (and `license_url` for photos):
 
-- **Sprites:** CC0 1.0.
+- **Sprites:** CC0 1.0, except the game-icons.net icons: CC BY 3.0 (credit the `creator`; see the sprites section).
 - **Scenes:** CC0 1.0, as they are made only from the sprites.
 - **Photos:** CC0, public domain, or CC BY 1.0–4.0. All Open Images photos are listed as CC BY 2.0.
 - **Open Images annotations** (the boxes and labels behind the crops and captions): CC BY 4.0, by Google.

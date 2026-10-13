@@ -29,6 +29,15 @@ These are suitable candidates for a later genuine pixel-art fine-tuning set. Dow
 | [Buch](https://opengameart.org/content/a-platformer-in-the-forest) | A Platformer in the Forest | CC0 |
 | [surt](https://opengameart.org/content/another-nes-like-village) | Another NES-like Village | CC0 |
 | [Screaming Brain Studios](https://screamingbrainstudios.itch.io/tiny-texture-pack) | Tiny Texture Pack | CC0 1.0; textures rather than sprites |
+| Crawl Stone Soup artists, maintained by Chris Hamons ([OpenGameArt](https://opengameart.org/content/dungeon-crawl-32x32-tiles-supplemental)) | Dungeon Crawl 32x32 tiles, Full (original + supplemental) | CC0 on the page and in the pack's `LICENSE.txt`; artist list in the pack. Not used, since the dataset is public: `player/base` (undressed character bodies), `water_nymph`, `harpy`, `human_slave` and `slave_freed` |
+| [Scrittl](https://opengameart.org/content/spaceship-set-32x32px) | Spaceship set 32x32px | CC0 |
+| [Jull](https://opengameart.org/node/50777) | Animated spaceships | CC0; most ships are 128x32 animation strips |
+| [Idylwild](https://opengameart.org/content/idylwilds-inventory) | Idylwild's Inventory | CC0 |
+| [wender](https://opengameart.org/node/176168) | Sports cars pixelart sprites | CC0 |
+| PIXEL32, edited by [psycho_666](https://opengameart.org/node/15049) | Pixel Art Vehicles | CC0; sprite sheets, larger than 32x32 |
+| [domsson](https://opengameart.org/content/two-pixelish-tree-sprites) | Two pixelish Tree sprites | CC0; 48x76, larger than 32x32 |
+| Surt, uploaded by [vk](https://opengameart.org/content/trees-1) | trees | CC0; a 416x160 sheet |
+| [game-icons.net](https://game-icons.net/about.html) contributors ([repository](https://github.com/game-icons/icons)) | Game Icons (SVG) | CC BY 3.0, with Viscious Speed and Zeromancer CC0 (`license.txt`); credit each author. Not used: abstract icons and names about gore, drugs, self-harm or nudity |
 
 CC0 attribution is not required, but Pixl should retain creator and source information in its manifest.
 

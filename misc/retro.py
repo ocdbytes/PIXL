@@ -16,6 +16,7 @@ smoothing so every pixel stays sharp.
 
 from __future__ import annotations
 
+import textwrap
 from collections.abc import Sequence
 from typing import Any
 
@@ -32,6 +33,7 @@ DIM = "#55705a"
 GRID = "#1c2620"
 AMBER = "#e3b45a"
 CYAN = "#7fb2c9"
+ROSE = "#d08fbf"
 FONT = ["Menlo", "DejaVu Sans Mono", "Courier New", "monospace"]
 SPARKS = "▁▂▃▄▅▆▇█"
 WIDTH = 66  # inner width of the panel, in characters
@@ -118,6 +120,11 @@ def log_line(fields: dict[str, str], highlight: bool = False) -> str:
     return body + (f"  {amber}best{reset}" if highlight else "")
 
 
+def wrap(caption: str, width: int = 18) -> str:
+    """Breaks a caption into at most four lines of width characters."""
+    return "\n".join(textwrap.wrap(caption, width)[:4])
+
+
 def to_rgb(tokens: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """Turns a token grid into an RGB array; transparent pixels show the background."""
     rgba = np.asarray(decode(tokens.astype(np.uint8), palette)).astype(np.float32)
@@ -138,7 +145,8 @@ def dashboard(
 
     Args:
         train: Logged train points with "step", "loss" and "lr".
-        test: Logged test points with "step" and "loss".
+        test: Logged test points with "step" and one or more losses, e.g.
+            "loss", or one per data source; each loss gets its own line.
         samples: (n, 32, 32) generated tokens for captions, or None.
         references: (n, 32, 32) real tokens for the same captions.
         captions: Caption of each column.
@@ -149,9 +157,9 @@ def dashboard(
     """
     palette = load_palette()
     with plt.rc_context(THEME):
-        figure = plt.figure(figsize=(13, 7.2))
+        figure = plt.figure(figsize=(13, 8))
         grid = GridSpec(
-            3, len(captions), figure=figure, height_ratios=[2.2, 1, 1], hspace=0.3
+            3, len(captions), figure=figure, height_ratios=[2.2, 1, 1], hspace=0.6
         )
         figure.suptitle(title, fontsize=11, x=0.02, ha="left")
 
@@ -171,19 +179,20 @@ def dashboard(
                 linewidth=1.8,
                 label="train (smoothed)",
             )
-        if test:
+        names = [key for key in test[0] if key != "step"] if test else []
+        for name, colour in zip(names, (AMBER, CYAN, ROSE)):
             losses.plot(
                 [p["step"] for p in test],
-                [p["loss"] for p in test],
-                color=AMBER,
+                [p[name] for p in test],
+                color=colour,
                 marker="s",
                 markersize=4,
                 linewidth=1.5,
-                label="test",
+                label="test" if name == "loss" else f"test {name}",
             )
         losses.set_title("loss")
         losses.set_xlabel("step")
-        losses.legend(loc="upper right")
+        losses.legend(loc="best", fontsize=7)
 
         rate = figure.add_subplot(grid[0, half:])
         if train:
@@ -210,7 +219,7 @@ def dashboard(
                         to_rgb(images[column], palette), interpolation="nearest"
                     )
                 if row == 0:
-                    axis.set_title(caption[:14], fontsize=8, loc="center")
+                    axis.set_title(wrap(caption), fontsize=7, loc="center")
                 if column == 0:
                     axis.set_ylabel(label)
     return figure
@@ -247,7 +256,11 @@ def filmstrip(snapshots: list[tuple[int, np.ndarray]], captions: list[str]) -> F
                     axis.set_title(f"{step:,}", fontsize=7, color=DIM, loc="center")
                 if column == 0:
                     axis.set_ylabel(
-                        caption[:12], fontsize=7, rotation=0, ha="right", va="center"
+                        wrap(caption, 18),
+                        fontsize=7,
+                        rotation=0,
+                        ha="right",
+                        va="center",
                     )
     return figure
 
@@ -280,7 +293,7 @@ def grid(rows: list[tuple[str, np.ndarray]], captions: list[str], title: str) ->
                 axis.set_yticks([])
                 axis.grid(False)
                 if row == 0:
-                    axis.set_title(caption[:14], fontsize=8, loc="center")
+                    axis.set_title(wrap(caption), fontsize=7, loc="center")
                 if column == 0:
                     axis.set_ylabel(label)
     return figure

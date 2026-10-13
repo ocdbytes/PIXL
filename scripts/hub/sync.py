@@ -74,11 +74,15 @@ def sprite_group(row: dict[str, str]) -> str:
 
     Returns:
         The path without its frame number for animation frames, e.g.
-        ".../Frames/cherry/cherry" for "cherry-3.png"; otherwise the pack and
-        file name, shared by the 1-Bit Pack's colored and monochrome variants.
+        ".../Frames/cherry/cherry" for "cherry-3.png"; the path without its
+        variant number and _new/_old for Dungeon Crawl, e.g. ".../long_sword"
+        for "long_sword_5_new.png"; otherwise the pack and file name, shared by
+        the 1-Bit Pack's colored and monochrome variants.
     """
     if "/Frames/" in row["path"]:
         return re.sub(r"[-_]?\d+\.png$", "", row["path"])
+    if row["pack"].startswith("dcss_"):
+        return re.sub(r"(_\d+)*(_new|_old)?(_\d+)*\.png$", "", row["path"])
     return f"{row['pack']}/{Path(row['path']).name}"
 
 

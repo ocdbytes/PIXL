@@ -9,6 +9,9 @@ pixels have separate embeddings; learned caption, row, and column positions give
 them order and location. Training uses pixel cross-entropy and caption dropout;
 generation uses a key-value cache and optional classifier-free guidance
 (Ho & Salimans, 2022, https://arxiv.org/abs/2207.12598).
+
+ClipPixl reads the caption through the frozen CLIP text encoder (ClipText)
+instead of learned text embeddings; the pixel part is the same.
 """
 
 from __future__ import annotations
@@ -16,13 +19,16 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from transformers import AutoTokenizer, CLIPTextModel
 
 from .tokenizer import BOS, EOS, PAD, Tokenizer
+
+CLIP = "openai/clip-vit-base-patch32"
 
 
 @dataclass(frozen=True)
@@ -37,7 +43,9 @@ class Config:
         width: Size of every token's vector.
         layers: Transformer blocks.
         heads: Attention heads per block; width must divide by it.
-        dropout: Dropout inside blocks; 0 while the data is large for the model.
+        dropout: Dropout on each block's MLP output; 0 while the data is large for
+            the model. Attention has none: on Apple GPUs it stops the fused
+            attention kernel and costs ~5.7 GB more memory at batch 16.
     """
 
     text_vocab: int = 1024
@@ -75,7 +83,6 @@ class Block(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.heads: int = config.heads
-        self.dropout: float = config.dropout
         self.attention_norm = nn.LayerNorm(config.width)
         self.qkv = nn.Linear(config.width, 3 * config.width)
         self.project = nn.Linear(config.width, config.width)
@@ -112,11 +119,7 @@ class Block(nn.Module):
             cache["k"], cache["v"] = k, v
         # A single new token may see every cached one; a full sequence is causal.
         attended = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=q.shape[2] == k.shape[2],
-            dropout_p=self.dropout if self.training else 0.0,
+            q, k, v, is_causal=q.shape[2] == k.shape[2]
         )
         # Attention contributes to the original x
         # before passing attention to the project MLP it is reshaped
@@ -210,6 +213,10 @@ class Pixl(nn.Module):
         logits = self(captions, pixels)
         return F.cross_entropy(logits.flatten(0, 1), pixels.flatten())
 
+    def empty_captions(self, batch: int) -> Tensor:
+        """The empty caption slot for each of batch rows: the unconditioned input for guidance."""
+        return encode_captions([""] * batch, None)
+
     @torch.no_grad()
     def generate(
         self,
@@ -232,8 +239,9 @@ class Pixl(nn.Module):
         """
         batch = captions.shape[0]
         if guidance != 1:
-            empty = encode_captions([""] * batch, None).to(captions.device)
-            captions = torch.cat([captions, empty])
+            captions = torch.cat(
+                [captions, self.empty_captions(batch).to(captions.device)]
+            )
         # Each block keeps the keys and values of earlier tokens, so every step
         # runs the network on the newest pixel only.
         caches: list[dict[str, Tensor]] = [{} for _ in self.blocks]
@@ -254,6 +262,30 @@ class Pixl(nn.Module):
             if i + 1 < self.config.pixels:
                 logits = self.run(self.embed_pixels(token, start=i), caches)[:, -1]
         return torch.cat(pixels, dim=1)
+
+
+class ClipPixl(Pixl):
+    """Pixl that reads captions as frozen CLIP text outputs instead of learned ids.
+
+    Wherever Pixl takes (batch, caption) ids, this takes the (batch, caption,
+    clip_width) slot from ClipText. One linear layer maps it to the model width;
+    every other weight has Pixl's shape, so stage 1 weights load into it.
+    """
+
+    def __init__(self, config: Config | None = None, clip_width: int = 512) -> None:
+        super().__init__(config)
+        del self.text
+        self.text_in = nn.Linear(clip_width, self.config.width)
+        self._init(self.text_in)
+
+    def embed_text(self, captions: Tensor) -> Tensor:
+        """Turns (batch, caption, clip_width) CLIP outputs into vectors with their slot positions."""
+        slots = torch.arange(self.config.caption, device=captions.device)
+        return self.text_in(captions) + self.caption_position(slots)
+
+    def empty_captions(self, batch: int) -> Tensor:
+        """All-zero slots, which ClipText also gives empty and dropped captions."""
+        return torch.zeros(batch, self.config.caption, self.text_in.in_features)
 
 
 def encode_captions(
@@ -285,3 +317,54 @@ def encode_captions(
         ids = [BOS, *ids[: length - 2], EOS]
         rows.append([PAD] * (length - len(ids)) + ids)
     return torch.tensor(rows)
+
+
+class ClipText:
+    """Frozen CLIP text encoder that fills the caption slot of a ClipPixl.
+
+    Each caption becomes CLIP's per-token outputs from its last layer, padded
+    with zeros to the slot length. Empty and dropped captions are all zeros.
+
+    Attributes:
+        device: Where CLIP runs and its outputs are put.
+        tokenizer: CLIP's tokenizer.
+        model: CLIP's text half, frozen in eval mode.
+    """
+
+    def __init__(self, device: str, name: str = CLIP) -> None:
+        self.device = device
+        self.tokenizer = cast(Any, AutoTokenizer.from_pretrained(name))
+        self.model = (
+            cast(Any, CLIPTextModel.from_pretrained(name))
+            .to(device)
+            .eval()
+            .requires_grad_(False)
+        )
+
+    @torch.no_grad()
+    def __call__(
+        self, texts: list[str], drop: float = 0.0, length: int = Config.caption
+    ) -> Tensor:
+        """Turns captions into the caption slot.
+
+        Args:
+            texts: Captions.
+            drop: Chance of replacing each caption with the empty caption, as in
+                encode_captions.
+            length: Slot length in CLIP tokens; longer captions keep their first words.
+
+        Returns:
+            (len(texts), length, 512) float tensor on the device.
+        """
+        keep = [bool(text) and random.random() >= drop for text in texts]
+        inputs = self.tokenizer(
+            texts,
+            padding="max_length",
+            max_length=length,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        mask = (
+            inputs["attention_mask"] * torch.tensor(keep, device=self.device)[:, None]
+        )
+        return self.model(**inputs).last_hidden_state * mask[..., None]
