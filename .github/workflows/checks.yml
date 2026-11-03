@@ -1,0 +1,25 @@
+# Lint, type checks, unit tests and notebook import checks, with the locked dependencies.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+      # Python from .python-version; the tools and notebook kernel from the default groups.
+      - name: Install
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check
+      - name: Type check
+        run: uv run basedpyright
+      - name: Unit tests and notebook import checks
+        run: uv run python -m unittest discover -s . -p "test_*.py"

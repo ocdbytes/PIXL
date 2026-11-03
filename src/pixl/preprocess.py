@@ -1,15 +1,16 @@
 """Builds the shared colour palette and turns images into palette tokens and back.
 
 Every image the model sees is a grid of tokens: token 0 is transparent and tokens
-1-255 are the palette's colours, so each pixel fits in one byte. The palette holds
-every colour the sprites use, so sprites are encoded exactly, and fills the other
-slots with colours picked from photo targets by median cut. It is saved to
-src/palette.json; a trained model only works with the palette it was trained on,
-so rebuild it only before training from scratch.
+1-255 are the palette's colours, so each pixel fits in one byte. The builder keeps
+every source sprite colour, raising ValueError if they exceed 255, and fills the
+remaining slots with photo colours picked by median cut. The bundled palette
+predates later sprite packs, whose colours are mapped to their nearest entry.
+It is saved as palette.json in the package; rebuild it only before training from
+scratch, since trained models and cached tokens depend on the original palette.
 
 Build the palette from the Hugging Face dataset (downloads the photos once):
 
-    uv run python -m src.preprocess
+    uv run python -m pixl.preprocess
 """
 
 from __future__ import annotations
@@ -18,15 +19,20 @@ import argparse
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from datasets import load_dataset
 from PIL import Image
 
+if TYPE_CHECKING:
+    from importlib.resources.abc import Traversable
+
 REPO = "ocdbytes/pixl-data"
-PALETTE = Path("src/palette.json")
+# Bundled with the package and read through its resources, so any working directory works.
+PALETTE = resources.files("pixl").joinpath("palette.json")
 TRANSPARENT = 0
 # Colour tokens; with TRANSPARENT the vocabulary has 256 tokens.
 COLOURS = 255
@@ -58,7 +64,7 @@ def build_palette(
     Args:
         sprites: Sprites whose colours are all kept.
         photos: Photo targets the remaining colours are picked from by median cut.
-        size: Most colours in the palette.
+        size: Maximum number of opaque colours in the palette.
 
     Returns:
         A (n, 3) uint8 array of distinct colours, n <= size, sorted. Token i is
@@ -97,9 +103,7 @@ def encode(image: Image.Image, palette: np.ndarray) -> np.ndarray:
     colours, inverse = np.unique(
         rgba[..., :3].reshape(-1, 3), axis=0, return_inverse=True
     )
-    # TODO :
-    # Try Oklab distance if the colors generated are very off palette
-    # It matters for non sprite images only
+    # TODO: Compare Oklab distance for photos and sprite colours absent from the palette.
     distance = ((colours[:, None].astype(np.int32) - palette[None]) ** 2).sum(axis=-1)
     nearest = (distance.argmin(axis=1) + 1).astype(np.uint8)
     tokens = nearest[inverse.reshape(-1)].reshape(rgba.shape[:2])
@@ -124,12 +128,13 @@ def decode(tokens: np.ndarray, palette: np.ndarray) -> Image.Image:
     return Image.fromarray(rgba)
 
 
-def save_palette(palette: np.ndarray, path: Path = PALETTE) -> None:
+def save_palette(palette: np.ndarray, path: Traversable = PALETTE) -> None:
+    """Writes the palette; by default over the package's own palette.json."""
     data = {"transparent": TRANSPARENT, "colours": palette.tolist()}
-    _ = path.write_text(json.dumps(data), encoding="utf-8")
+    _ = Path(str(path)).write_text(json.dumps(data), encoding="utf-8")
 
 
-def load_palette(path: Path = PALETTE) -> np.ndarray:
+def load_palette(path: Traversable = PALETTE) -> np.ndarray:
     """Reads the palette; token i (1..n) is colours[i - 1]."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return np.array(data["colours"], np.uint8)

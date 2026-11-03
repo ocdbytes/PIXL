@@ -1,74 +1,45 @@
 # pixl
 
-Pixl is a text-to-pixel-art model. It represents 32×32 images with a shared 256-token colour palette and generates them one pixel at a time with a decoder-only Transformer.
+Pixl is a text-to-pixel-art model. It draws a 32×32 image one pixel at a time from a caption, with an encoder-decoder Transformer trained from scratch. It learns from a million generated scenes, each with four sprites in the four quadrants of the image and a caption that says which sprite is where.
 
-Stage 1 (photo pretraining) and stage 2 (fine-tuning on sprites and scenes) are ready, with the datasets, tokenizers, and model. Stage 3 (reinforcement learning) is not yet implemented.
-
-## Setup and train
+## Quick start
 
 ```bash
 uv sync
+OMP_NUM_THREADS=4 nice -n 19 uv run python -m pixl.train --quick --device cpu   # a light 40-step check
 ```
 
-Open [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) (stage 1), then [`notebooks/clip-finetune.ipynb`](notebooks/clip-finetune.ipynb) (stage 2), in VS Code with the project's `.venv` kernel, or start Jupyter:
+Full training belongs on a GPU server. From the repo, copy the code there (`SERVER` is `user@host`), then build and run the Docker image on the server:
 
 ```bash
-uv run --with jupyter jupyter lab
+rsync -av --relative --exclude __pycache__ pyproject.toml uv.lock README.md Dockerfile .dockerignore src SERVER:pixl/
+cd pixl && docker build -t pixl .                                    # on the server
+docker run --gpus all --rm -d --name pixl-train \
+  -v "$PWD/checkpoints:/app/checkpoints" -v pixl-hf:/root/.cache/huggingface pixl
 ```
 
-The notebooks load the public [`ocdbytes/pixl-data`](https://huggingface.co/datasets/ocdbytes/pixl-data) dataset automatically. The first photo load downloads about 2.4 GB. On the measured Apple-silicon GPU, stage 1 (three epochs) takes about 3.5 hours and stage 2 (8,000 steps) about 2.3 hours; checkpoints are written to `checkpoints/`. Set `QUICK = True` for a short smoke test.
+Copy `checkpoints/` back, then open [`notebooks/train.ipynb`](notebooks/train.ipynb) to see the run and [`notebooks/generate.ipynb`](notebooks/generate.ipynb) to draw your own captions.
 
-See [`src/README.md`](src/README.md) for the palette, caption tokenizer, data loader, model architecture, and training details.
+## Docs
+
+| Page | Covers |
+|---|---|
+| [Model](docs/model.md) | Colour palette, caption tokenizer, model architecture |
+| [Data](docs/data.md) | The Hugging Face dataset, loading it, generating scenes, pushing and pulling |
+| [Training](docs/training.md) | The training command, devices, notebooks, measures, checkpoints and resuming |
+| [GPU server](docs/server.md) | The Docker image, running it, troubleshooting |
+| [Development](docs/development.md) | Package layout, dependencies, checks and CI |
 
 ## Project map
 
 | Path | Purpose |
 |---|---|
-| [`src/`](src/README.md) | Palette and caption tokenizers, data loader, model, and data setup |
-| [`notebooks/pretrain.ipynb`](notebooks/pretrain.ipynb) | Stage 1 photo pretraining |
-| [`notebooks/clip-finetune.ipynb`](notebooks/clip-finetune.ipynb) | Stage 2 fine-tuning on sprites and scenes, with captions read by frozen CLIP |
-| [`misc/retro.py`](misc/retro.py) | Training displays |
-| [`scripts/data/`](scripts/data/README.md) | Download and build aligned photo/pixel-art pairs |
-| [`scripts/labeler/`](scripts/labeler/README.md) | Label and gather sprite assets |
-| [`scripts/refine/`](scripts/refine/README.md) | Remove unsuitable or mismatched photo pairs |
-| [`scripts/scenes/`](scripts/scenes/README.md) | Build captioned scenes from sprites |
-| [`scripts/hub/`](scripts/hub/README.md) | Push and pull the Hugging Face dataset |
+| [`src/pixl/`](src/pixl) | The `pixl` package: tokenizers, data loader, model and training |
+| [`notebooks/`](notebooks) | Train and generate |
+| [`scripts/scenes/`](scripts/scenes) | Build the scenes from sprites |
+| [`scripts/hub/`](scripts/hub) | Push and pull the Hugging Face dataset |
+| [`docs/`](docs) | Technical documentation |
 | [`sources.md`](sources.md) | Approved and rejected sprite sources |
-
-Generated data lives in `pixel-image-data/`, `downloaded-data/`, and `scene-data/`. Model states live in `checkpoints/`. These directories are excluded from Git.
-
-## Change the dataset
-
-This is only needed for new photo queries, sprite packs, or labels. To start from the current Hub data:
-
-```bash
-uv run python -m scripts.hub.sync pull
-```
-
-Alternatively, place approved sprite packs in `downloaded-data/`, then run the complete pipeline:
-
-```bash
-uv run python -m src.setup_data --user-agent "PixlDataset/0.1 (your-email@example.com)"
-```
-
-The pipeline runs four steps:
-
-| Step | Details | Typical time |
-|---|---|---:|
-| Download photo pairs | [`scripts/data`](scripts/data/README.md) | 1–2 days initially; resumable |
-| Label sprites | [`scripts/labeler`](scripts/labeler/README.md) | Seconds when nothing is new |
-| Filter photos | [`scripts/refine`](scripts/refine/README.md) | About 12 minutes initially, then seconds |
-| Generate scenes | [`scripts/scenes`](scripts/scenes/README.md) | About 15 seconds |
-
-`downloaded-data/manifest.csv` must exist before running the pipeline. Add `--label-model florence` to label new sprites with Florence-2. Each step can also run independently using the commands in its README.
-
-Review `pixel-image-data/review/` and `scene-data/review/`, then upload:
-
-```bash
-uv run python -m scripts.hub.sync push
-```
-
-A push updates the public dataset immediately. See the [Hub README](scripts/hub/README.md) for split and overwrite behavior.
 
 ## License
 

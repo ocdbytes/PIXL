@@ -2,16 +2,18 @@
 
 Text is lowercased and split into words. Each word starts as its UTF-8 bytes with
 a leading space, so tokens know where words begin. Training repeatedly merges the
-most frequent adjacent pair of tokens into a new token until the vocabulary is
-full (Sennrich et al., 2016, https://arxiv.org/abs/1508.07909). Common words end
+most frequent adjacent pair of tokens into a new token until the requested
+vocabulary size is reached or no pairs remain (Sennrich et al., 2016,
+https://arxiv.org/abs/1508.07909). Common words end
 up as one token; a word never seen in training splits into smaller pieces, down
 to single bytes, so any text can be encoded.
 
 Token ids: 0 <pad>, 1 <bos>, 2 <eos>, 3-258 the 256 bytes, then one id per merge.
-Saved to src/tokenizer.json; a trained model only works with the tokenizer it was
-trained with, so retrain it only before training the model from scratch.
+Saved as tokenizer.json in the package; a trained model only works with the
+tokenizer it was trained with, so retrain it only before training the model from
+scratch.
 
-    uv run python -m src.tokenizer
+    uv run python -m pixl.tokenizer
 """
 
 from __future__ import annotations
@@ -22,14 +24,20 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
+from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from datasets import load_dataset
 
 from .data import COLUMNS
 from .preprocess import REPO
 
-TOKENIZER = Path("src/tokenizer.json")
+if TYPE_CHECKING:
+    from importlib.resources.abc import Traversable
+
+# Bundled with the package and read through its resources, so any working directory works.
+TOKENIZER = resources.files("pixl").joinpath("tokenizer.json")
 PAD, BOS, EOS = 0, 1, 2
 SPECIALS = {"<pad>": PAD, "<bos>": BOS, "<eos>": EOS}
 # Id of byte 0; byte b is FIRST_BYTE + b, and merges follow the 256 bytes.
@@ -128,7 +136,7 @@ class Tokenizer:
         return [i for word in words(text) for i in self.word(word)]
 
     def decode(self, ids: Iterable[int]) -> str:
-        """Turns token ids back into text; special tokens are dropped."""
+        """Decodes to lowercase text with normalised whitespace; drops special tokens."""
         data = b"".join(self.pieces[i] for i in ids if i >= FIRST_BYTE)
         return data.decode("utf-8", errors="replace").strip()
 
@@ -138,17 +146,18 @@ class Tokenizer:
             return next(name for name, i in SPECIALS.items() if i == token)
         return self.pieces[token].decode("utf-8", errors="replace")
 
-    def save(self, path: Path = TOKENIZER) -> None:
+    def save(self, path: Traversable = TOKENIZER) -> None:
         data = {
             "specials": SPECIALS,
             "merges": self.merges,
             # For reading only; load() rebuilds the pieces from the merges.
             "tokens": [self.piece(i) for i in range(self.vocab_size)],
         }
-        _ = path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        # By default over the package's own tokenizer.json.
+        _ = Path(str(path)).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: Path = TOKENIZER) -> Tokenizer:
+    def load(cls, path: Traversable = TOKENIZER) -> Tokenizer:
         data = json.loads(path.read_text(encoding="utf-8"))
         return cls([(first, second) for first, second in data["merges"]])
 
@@ -181,7 +190,7 @@ def main() -> None:
     tokenizer.save()
     print(f"saved {tokenizer.vocab_size} tokens to {TOKENIZER}")
 
-    # Checks: every caption decodes back to itself; lengths per config.
+    # Check round trips after lowercasing and normalising whitespace; lengths per config.
     for split, by_config in (("train", train_captions), ("test", captions("test"))):
         for config, texts in by_config.items():
             lengths = [len(tokenizer.encode(text)) for text in texts]

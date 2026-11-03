@@ -1,0 +1,7 @@
+# Send only what the image needs; the data directories alone are gigabytes.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+**/__pycache__

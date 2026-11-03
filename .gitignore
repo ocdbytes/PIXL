@@ -6,3 +6,4 @@ __pycache__/
 /scene-data/
 /checkpoints/
 .ipynb_checkpoints/
+/runs/

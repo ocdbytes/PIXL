@@ -5,21 +5,27 @@ so pixel size and look stay consistent:
 
 1. A background tile from BACKGROUNDS fills every slot. Styles without one use a
    transparent canvas.
-2. One or two objects go into slots: 16 px slots (2x2) for most packs, 8 px slots
-   (4x4) for Pico-8 City. Sprites are not scaled, except those of the 32 px packs
-   in HALVED, which are halved; two objects share a row or a column.
-3. The caption is written from the placement, e.g. "a pine tree at the top left
-   on grass" or "a pine tree left of a red house on grass".
+2. Four objects with different labels fill the four 16 px slots (2x2). Sprites
+   are not scaled, except those of the 32 px packs in HALVED, which are halved.
+   With --no-four, one or two objects go into slots instead, also in the 8 px
+   slots (4x4) of Pico-8 City; two objects share a row or a column.
+3. The caption is written from the placement, e.g. "a pine tree at the bottom
+   right, a red house at the top left, a well at the top right and a barrel at
+   the bottom left on grass", the objects in random order; with --no-four, "a pine
+   tree at the top left on grass" or "a pine tree left of a red house on grass".
 
 Sprite roles come from role(); --sheets saves review sheets of them and of sample
 scenes. Train scenes use only train-split sprites as objects. Test scenes use
-test-split sprites ("new sprites"), or train sprites in pairs that never appear
-in train scenes ("new pair"). Backgrounds always come from train-split sprites.
+test-split sprites ("new sprites"), or train sprites with at least one label pair
+absent from train scenes ("new pair"). Backgrounds always use train-split sprites.
 
-Writes scene-data/image/*.png and scene-data/manifest.csv. The seed is fixed, so
-a rerun makes the same scenes.
+Only coloured objects are placed (--no-colour adds the monochrome ones). Writes
+scene-data/manifest.csv and scene-data/tokens.npy, whose row i is the palette
+tokens of manifest row i: a million scenes as PNG files would take ~4 GB. The seed
+is fixed, so unchanged sprite inputs and settings reproduce the same scenes.
 
     uv run python -m scripts.scenes.generate --sheets
+    uv run python -m scripts.scenes.generate --no-four --no-colour --train 100000
 """
 
 from __future__ import annotations
@@ -29,14 +35,16 @@ import csv
 import hashlib
 import random
 import re
-import shutil
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import chain, combinations
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
+from pixl.preprocess import encode, load_palette
 from scripts.hub.sync import PART
 
 SPRITES = Path("downloaded-data")
@@ -101,7 +109,7 @@ BACKGROUNDS = {
     "tilled soil row": "tilled soil",
 }
 # Labels naming part of a larger picture, such as a tile edge or a piece of a
-# building; such sprites are never placed.
+# building; such sprites are never placed as objects.
 FRAGMENT = re.compile(
     r"\b(edge|corner|end|top|bottom|left|right|side|border|half|part|piece|segment"
     r"|middle|center|slope|ridge|gable|junction|crossing|crossroad|intersection"
@@ -116,6 +124,8 @@ HELD_OUT = 0.05
 HALVED = {"dcss_dungeon-crawl-32x32"}
 # A halved object is only placed when its largest connected piece holds this share of its pixels.
 WHOLE = 0.8
+# The slots of a 2x2 grid, which four-object scenes fill.
+QUADRANTS = [(0, 0), (0, 1), (1, 0), (1, 1)]
 
 
 @dataclass
@@ -129,9 +139,11 @@ class Sprite:
 
 @dataclass
 class Args(argparse.Namespace):
-    train: int = 100_000
+    train: int = 1_000_000
     test: int = 2_000
     sheets: bool = False
+    colour: bool = True
+    four: bool = True
 
 
 def style_of(row: dict[str, str]) -> str:
@@ -172,8 +184,8 @@ def role(image: Image.Image, label: str, slot: int) -> str:
 
     Returns:
         "background" for an opaque one-slot tile labelled in BACKGROUNDS,
-        "object" for a sprite with transparency that fits a slot and is neither
-        terrain nor a fragment, otherwise "".
+        "object" for a sprite with transparency that fits a slot, has at least
+        5% opaque pixels, and is neither terrain nor a fragment, otherwise "".
     """
     opaque = np.asarray(image)[..., 3] >= 128
     if image.size == (slot, slot) and opaque.all():
@@ -268,22 +280,28 @@ def caption(
     """Writes the caption of a scene from its placement.
 
     Args:
-        placed: (object, (row, column)) per object, one or two.
+        placed: (object, (row, column)) per object: one, two, or four in the
+            order the caption lists them.
         ground: Caption name of the background, or "" for none.
         grid: Slots per side.
 
     Returns:
-        e.g. "a tree at the top left on grass" or "a tree left of a house".
+        e.g. "a tree at the top left on grass", "a tree left of a house", or
+        "a tree at the top left, a house at the top right, a well at the bottom
+        left and a barrel at the bottom right".
     """
-    if len(placed) == 1:
-        sprite, (row, column) = placed[0]
-        half = grid // 2
-        where = f"{'top' if row < half else 'bottom'} {'left' if column < half else 'right'}"
-        text = f"{article(sprite.label)} at the {where}"
-    else:
+    if len(placed) == 2:
         (first, (row, _)), (second, (other, _)) = sorted(placed, key=lambda p: p[1])
         relation = "left of" if row == other else "above"
         text = f"{article(first.label)} {relation} {article(second.label)}"
+    else:
+        half = grid // 2
+        phrases = [
+            f"{article(sprite.label)} at the {'top' if row < half else 'bottom'} "
+            f"{'left' if column < half else 'right'}"
+            for sprite, (row, column) in placed
+        ]
+        text = phrases[0] if len(phrases) == 1 else f"{', '.join(phrases[:-1])} and {phrases[-1]}"
     return f"{text} on {ground}" if ground else text
 
 
@@ -333,18 +351,29 @@ def make_scenes(
     objects: list[Sprite],
     backgrounds: list[Sprite],
     rng: random.Random,
-) -> list[tuple[dict[str, str], Image.Image]]:
-    """Makes distinct scenes of one kind.
+    four: bool = False,
+) -> Iterator[tuple[dict[str, str], Image.Image]]:
+    """Makes scenes with distinct IDs within one kind, one at a time.
+
+    IDs include object placement in caption order, so different caption orders
+    can yield the same image.
 
     Args:
         count: Number of scenes.
-        kind: "train", "new sprites" or "new pair".
+        kind: "train", "new sprites" or "new pair". With four, a "new pair"
+            scene holds at least one pair of labels kept out of train scenes,
+            and a train scene none.
         objects: Sprites that may be placed.
         backgrounds: Background tiles, from train-split sprites.
         rng: Random source.
+        four: Make four-object scenes: four different labels fill the four
+            16 px slots, listed in random order. Styles with 8 px slots are
+            left out.
 
-    Returns:
-        (manifest row, image) per scene.
+    Yields:
+        (manifest row, image) per scene. The row's "swapped" is the caption with
+        the positions reversed: the first two listed objects exchange slots, or
+        a single object is mirrored left to right.
     """
     by_style: dict[str, list[Sprite]] = defaultdict(list)
     for sprite in objects:
@@ -352,18 +381,31 @@ def make_scenes(
     grounds: dict[str, list[Sprite]] = defaultdict(list)
     for sprite in backgrounds:
         grounds[sprite.style].append(sprite)
-    # A style needs two different labels to make pairs.
+    # A style needs two different labels to make pairs, or four 16 px ones for four-object scenes.
     styles = sorted(
-        s for s, group in by_style.items() if len({x.label for x in group}) > 1
+        s
+        for s, group in by_style.items()
+        if len({x.label for x in group}) >= (4 if four else 2)
+        and (not four or slot_size(s) == 16)
     )
 
-    scenes: dict[str, tuple[dict[str, str], Image.Image]] = {}
-    while len(scenes) < count:
+    seen: set[str] = set()
+    while len(seen) < count:
         style = rng.choice(styles)
         slot = slot_size(style)
         grid = CANVAS // slot
         pool = by_style[style]
-        if kind != "new pair" and rng.random() < 0.5:
+        if four:
+            chosen = rng.sample(pool, 4)
+            if len({sprite.label for sprite in chosen}) < 4:
+                continue
+            pairs = [held_out(a.label, b.label) for a, b in combinations(chosen, 2)]
+            if kind == "train" and any(pairs):
+                continue
+            if kind == "new pair" and not any(pairs):
+                continue
+            cells = rng.sample(QUADRANTS, 4)
+        elif kind != "new pair" and rng.random() < 0.5:
             chosen = [rng.choice(pool)]
             cells = [(rng.randrange(grid), rng.randrange(grid))]
         else:
@@ -386,25 +428,28 @@ def make_scenes(
         parts = [style, background.path if background else ""]
         parts += [f"{sprite.path}@{r},{c}" for sprite, (r, c) in placed]
         scene_id = hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
-        if scene_id in scenes:
+        if scene_id in seen:
             continue
+        seen.add(scene_id)
+        if len(placed) == 1:
+            swapped = [(chosen[0], (cells[0][0], grid - 1 - cells[0][1]))]
+        else:
+            swapped = [(chosen[0], cells[1]), (chosen[1], cells[0]), *placed[2:]]
+        name = ground(background.label) or "" if background else ""
         row = {
             "id": scene_id,
             "split": "train" if kind == "train" else "test",
             "kind": kind,
-            "caption": caption(
-                placed, ground(background.label) or "" if background else "", grid
-            ),
+            "caption": caption(placed, name, grid),
+            "swapped": caption(swapped, name, grid),
             "style": style,
             "background": background.label if background else "",
             "objects": "|".join(sprite.label for sprite, _ in placed),
             "slots": "|".join(f"{r},{c}" for _, (r, c) in placed),
             "sprites": "|".join(sprite.path for sprite, _ in placed),
             "background_path": background.path if background else "",
-            "path": f"image/{scene_id}.png",
         }
-        scenes[scene_id] = (row, compose(background, placed, slot))
-    return list(scenes.values())
+        yield row, compose(background, placed, slot)
 
 
 def save_sheets(
@@ -474,42 +519,70 @@ def parse_args() -> Args:
         "--test", type=int, default=Args.test, help="half new sprites, half new pairs"
     )
     _ = parser.add_argument("--sheets", action="store_true", help="save review sheets")
+    _ = parser.add_argument(
+        "--colour",
+        action=argparse.BooleanOptionalAction,
+        default=Args.colour,
+        help='place only coloured objects, not those labelled "monochrome"',
+    )
+    _ = parser.add_argument(
+        "--four",
+        action=argparse.BooleanOptionalAction,
+        default=Args.four,
+        help="four objects per scene, one in each 16 px slot of a 2x2 grid; "
+        "--no-four places one or two",
+    )
     return parser.parse_args(namespace=Args())
 
 
 def main() -> None:
     args = parse_args()
     roles = load_sprites()
-    train_objects = [s for s in roles["object"] if s.split == "train"]
-    test_objects = [s for s in roles["object"] if s.split == "test"]
+    objects = [
+        s
+        for s in roles["object"]
+        if not (args.colour and s.label.startswith("monochrome "))
+    ]
+    train_objects = [s for s in objects if s.split == "train"]
+    test_objects = [s for s in objects if s.split == "test"]
     backgrounds = [s for s in roles["background"] if s.split == "train"]
     print(
         f"roles: {len(backgrounds)} train backgrounds, {len(train_objects)} train objects, {len(test_objects)} test objects"
     )
 
-    scenes = make_scenes(
-        args.train, "train", train_objects, backgrounds, random.Random(0)
-    )
     rng = random.Random(1)
-    scenes += make_scenes(args.test // 2, "new sprites", test_objects, backgrounds, rng)
-    scenes += make_scenes(
-        args.test - args.test // 2, "new pair", train_objects, backgrounds, rng
+    scenes = chain(
+        make_scenes(
+            args.train, "train", train_objects, backgrounds, random.Random(0), args.four
+        ),
+        make_scenes(
+            args.test // 2, "new sprites", test_objects, backgrounds, rng, args.four
+        ),
+        make_scenes(
+            args.test - args.test // 2, "new pair", train_objects, backgrounds, rng, args.four
+        ),
     )
 
-    images = OUTPUT.joinpath("image")
-    shutil.rmtree(images, ignore_errors=True)
-    images.mkdir(parents=True)
-    for row, image in scenes:
-        image.save(OUTPUT.joinpath(row["path"]), optimize=True)
-    with OUTPUT.joinpath("manifest.csv").open(
-        "w", newline="", encoding="utf-8"
-    ) as file:
-        writer = csv.DictWriter(file, fieldnames=list(scenes[0][0]))
+    OUTPUT.mkdir(exist_ok=True)
+    palette = load_palette()
+    tokens = np.empty((args.train + args.test, CANVAS, CANVAS), np.uint8)
+    rows, samples = [], []
+    for n, (row, image) in enumerate(scenes):
+        tokens[n] = encode(image, palette)
+        rows.append(row)
+        if len(samples) < 60:
+            samples.append((row, image))
+        if (n + 1) % 100_000 == 0:
+            print(f"{n + 1:,} scenes")
+    # Row i of the manifest is tokens[i].
+    np.save(OUTPUT.joinpath("tokens.npy"), tokens)
+    with OUTPUT.joinpath("manifest.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows(row for row, _ in scenes)
-    print(f"wrote {len(scenes)} scenes to {OUTPUT}")
+        writer.writerows(rows)
+    print(f"wrote {len(rows):,} scenes to {OUTPUT}")
     if args.sheets:
-        save_sheets(roles, scenes)
+        save_sheets(roles, samples)
 
 
 if __name__ == "__main__":
