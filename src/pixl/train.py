@@ -297,9 +297,12 @@ def train(args: Args) -> Path:
         """Saves resume state and the logs/previews used by both notebooks."""
         preview_set = {"captions": [eval_captions[i] for i in preview], "swapped": [eval_swapped[i] for i in preview],
                        "tokens": eval_tokens[preview]}
+        # Write a temporary file, then rename it: a stop mid-write leaves the previous checkpoint whole.
+        temporary = checkpoint.with_suffix(".tmp")
         torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": asdict(model.config),
                     "step": step, "log": log, "preview": preview_set, "settings": settings,
-                    "fingerprints": fingerprints, "random": random_states(), **extra}, checkpoint)
+                    "fingerprints": fingerprints, "random": random_states(), **extra}, temporary)
+        temporary.replace(checkpoint)
 
     started, window, tick = time.time(), [], time.time()
     model.train()
