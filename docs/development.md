@@ -5,7 +5,7 @@
 | Path | Contents |
 |---|---|
 | [`src/pixl/`](../src/pixl) | The `pixl` package: palette (`preprocess.py`), caption tokenizer (`tokenizer.py`), data loader (`data.py`), model (`model.py`) and training (`train.py`) |
-| [`scripts/scenes/`](../scripts/scenes) | Scene generator ([data.md](data.md#scenes)) |
+| [`scripts/scenes/`](../scripts/scenes) | Scene generator ([data.md](data.md#scenes)), and the app's `vocabulary.json` builder |
 | [`scripts/hub/`](../scripts/hub) | Hugging Face sync and dataset card ([data.md](data.md#hugging-face-sync)) |
 | [`notebooks/`](../notebooks) | Training and generation notebooks ([training.md](training.md#notebooks)) |
 | [`tests/`](../tests) and `scripts/*/tests/` | Unit tests and the notebook import check |
@@ -24,8 +24,9 @@ Data lives in `downloaded-data/` (sprites) and `scene-data/` (scenes), and model
 | main | `datasets`, `huggingface-hub`, `numpy`, `pillow`, `torch` | Everything, including the Docker image |
 | `dev` | `ruff`, `basedpyright` | `uv sync` (a default group) |
 | `notebook` | `ipykernel`, `ipywidgets`, `matplotlib`, `pandas` | `uv sync` (a default group) |
+| `app` | `gradio` | `uv sync` (a default group) |
 
-[`uv.lock`](../uv.lock) pins every version, and [`.python-version`](../.python-version) picks Python 3.11. The Docker image installs the main dependencies only (`--no-default-groups`).
+[`uv.lock`](../uv.lock) pins every version, [`.python-version`](../.python-version) picks Python 3.11, and the package requires 3.11 or newer. The Docker image installs the main dependencies only (`--no-default-groups`).
 
 ## Checks
 

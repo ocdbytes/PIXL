@@ -8,3 +8,9 @@ uv run python -m scripts.hub.sync push --only scenes   # publishes to the public
 ```
 
 It writes `scene-data/tokens.npy` and `scene-data/manifest.csv`, and with `--sheets` review images in `scene-data/review/`. Splits, flags and how a scene is made are in [docs/data.md](../../docs/data.md#scenes).
+
+`vocabulary.py` reads that manifest and writes `src/pixl/vocabulary.json`: each pack's object labels and grounds, exactly as the train captions write them. The app (`python -m pixl.app`) builds its menus from it. Rerun it after regenerating the scenes:
+
+```bash
+uv run python -m scripts.scenes.vocabulary
+```

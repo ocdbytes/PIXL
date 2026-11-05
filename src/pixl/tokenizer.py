@@ -25,6 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -88,7 +89,7 @@ def train(texts: Iterable[str], vocab_size: int) -> list[Pair]:
     while FIRST_MERGE + len(merges) < vocab_size:
         pairs: Counter[Pair] = Counter()
         for word, ids in pieces.items():
-            for pair in zip(ids, ids[1:]):
+            for pair in pairwise(ids):
                 pairs[pair] += counts[word]
         if not pairs:
             break  # every word is already one token
@@ -125,7 +126,7 @@ class Tokenizer:
         ids = [FIRST_BYTE + byte for byte in word]
         while len(ids) > 1:
             pair = min(
-                zip(ids, ids[1:]), key=lambda p: self.ids.get(p, self.vocab_size)
+                pairwise(ids), key=lambda p: self.ids.get(p, self.vocab_size)
             )
             if pair not in self.ids:
                 break

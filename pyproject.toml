@@ -3,7 +3,7 @@ name = "pixl"
 version = "0.1.0"
 description = "A pixel-art generation model"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.5.0",
     "huggingface-hub>=0.36.2",
@@ -19,13 +19,16 @@ requires = ["uv_build>=0.11.30,<0.12"]
 build-backend = "uv_build"
 
 [tool.uv]
-# Plain `uv sync` installs the tools and the notebook kernel; the Docker image skips both.
-default-groups = ["dev", "notebook"]
+# Plain `uv sync` installs the tools, the notebook kernel and the app; the Docker image skips them.
+default-groups = ["dev", "notebook", "app"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
 
 [dependency-groups]
+app = [
+    "gradio>=6.31.0",
+]
 dev = [
     "basedpyright>=1.39.10",
     "ruff>=0.17.3",

@@ -14,6 +14,8 @@ license: cc0-1.0
 
 # pixl
 
+> 🙏 **Thanks to [@harshitruwali](https://huggingface.co/harshitruwali) for the GPU compute used to train pixl.**
+
 pixl draws a 32×32 pixel-art scene from a caption, one pixel at a time. It is a 26.7M-parameter encoder-decoder Transformer trained from scratch on one million generated scenes. Each scene has four sprites, one in each quadrant, and a caption that says which sprite goes where:
 
 > a purple robed wizard at the top left, a closed treasure chest at the top right, a brown bat at the bottom left and a red potion at the bottom right on a dark dungeon floor

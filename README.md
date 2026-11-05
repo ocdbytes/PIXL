@@ -4,6 +4,8 @@
 
 # pixl
 
+> 🙏 **Thanks to [@harshitruwali](https://github.com/harshitruwali) for the GPU compute used to train pixl.**
+
 Pixl is a text-to-pixel-art model. It draws a 32×32 image one pixel at a time from a caption, with an encoder-decoder Transformer trained from scratch. It learns from a million generated scenes, each with four sprites in the four quadrants of the image and a caption that says which sprite is where.
 
 ## Draw a scene
@@ -34,6 +36,19 @@ image.resize((256, 256), Image.Resampling.NEAREST).save("scene.png")
 ```
 
 A caption names four objects from one sprite pack, each with its quadrant, then the ground, as in training. The [model card](https://huggingface.co/ocdbytes/pixl) lists what the model knows and its limits, and [`notebooks/generate.ipynb`](notebooks/generate.ipynb) has more prompts.
+
+## App
+
+![The pixl app](docs/app.png)
+
+```bash
+uv run python -m pixl.app   # then open http://127.0.0.1:7860
+```
+
+- **Scene:** pick a preset, or a sprite pack, its ground and an object for each quadrant. The menus list only what the model was trained on, and the app writes the caption for you.
+- **Randomize** fills in a random scene from the pack; **Rotate clockwise** moves every object one quadrant, to watch the model follow the caption.
+- **Advanced:** guidance, temperature, the number of scenes, and the seed. Each draw shows its seed, so it can be repeated exactly.
+- **Options:** `--bf16` downloads the half-size weights, `--device auto` uses a GPU, and `--share` serves a temporary public link. With `pip`, install `gradio` as well.
 
 ## Train
 

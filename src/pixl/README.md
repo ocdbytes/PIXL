@@ -8,6 +8,7 @@ The `pixl` package: a caption-to-pixel-art model and everything it needs.
 | [`tokenizer.py`](tokenizer.py) | The caption tokenizer ([`tokenizer.json`](tokenizer.json)) |
 | [`data.py`](data.py) | Loads the scenes from the Hugging Face dataset as captions and tokens |
 | [`model.py`](model.py) | `EncoderPixl`, the encoder-decoder model |
+| [`app.py`](app.py) | `python -m pixl.app`: a Gradio app that builds captions from [`vocabulary.json`](vocabulary.json) and draws them |
 | [`train.py`](train.py) | `python -m pixl.train`, `load_model()` for trained checkpoints, and `load_pretrained()` for the published model |
 
 Details are in [`docs/`](../../docs): [model](../../docs/model.md), [data](../../docs/data.md) and [training](../../docs/training.md).
