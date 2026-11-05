@@ -30,14 +30,15 @@ from typing import TYPE_CHECKING
 
 from datasets import load_dataset
 
-from .data import COLUMNS
-from .preprocess import REPO
+from .data import REPO
 
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
 # Bundled with the package and read through its resources, so any working directory works.
 TOKENIZER = resources.files("pixl").joinpath("tokenizer.json")
+# The dataset configs whose captions the tokenizer trains on -> their caption column.
+CAPTIONS = {"sprites": "label", "scenes": "caption"}
 PAD, BOS, EOS = 0, 1, 2
 SPECIALS = {"<pad>": PAD, "<bos>": BOS, "<eos>": EOS}
 # Id of byte 0; byte b is FIRST_BYTE + b, and merges follow the 256 bytes.
@@ -166,7 +167,7 @@ def captions(split: str) -> dict[str, list[str]]:
     """Reads every caption of one split from the Hugging Face dataset, per config."""
     return {
         config: load_dataset(REPO, config, split=split)[column]
-        for config, (column, _) in COLUMNS.items()
+        for config, column in CAPTIONS.items()
     }
 
 

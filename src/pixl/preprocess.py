@@ -1,90 +1,26 @@
-"""Builds the shared colour palette and turns images into palette tokens and back.
+"""Turns images into palette tokens and back, with the shared colour palette.
 
 Every image the model sees is a grid of tokens: token 0 is transparent and tokens
-1-255 are the palette's colours, so each pixel fits in one byte. The builder keeps
-every source sprite colour, raising ValueError if they exceed 255, and fills the
-remaining slots with photo colours picked by median cut. The bundled palette
-predates later sprite packs, whose colours are mapped to their nearest entry.
-It is saved as palette.json in the package; rebuild it only before training from
-scratch, since trained models and cached tokens depend on the original palette.
-
-Build the palette from the Hugging Face dataset (downloads the photos once):
-
-    uv run python -m pixl.preprocess
+1-255 are the palette's colours, so each pixel fits in one byte. The palette is
+palette.json in the package, and it is fixed: trained models and cached tokens
+depend on it. Sprite colours it lacks are mapped to their nearest entry.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-from collections.abc import Iterable
-from dataclasses import dataclass
 from importlib import resources
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
-from datasets import load_dataset
 from PIL import Image
 
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
-REPO = "ocdbytes/pixl-data"
 # Bundled with the package and read through its resources, so any working directory works.
 PALETTE = resources.files("pixl").joinpath("palette.json")
 TRANSPARENT = 0
-# Colour tokens; with TRANSPARENT the vocabulary has 256 tokens.
-COLOURS = 255
-
-
-@dataclass
-class Args(argparse.Namespace):
-    photos: int = 5000
-
-
-def opaque_pixels(image: Image.Image) -> np.ndarray:
-    """Returns the colours of an image's opaque pixels.
-
-    Args:
-        image: Image in any mode.
-
-    Returns:
-        An (n, 3) uint8 array with one RGB row per pixel whose alpha is >= 128.
-    """
-    rgba = np.asarray(image.convert("RGBA")).reshape(-1, 4)
-    return rgba[rgba[:, 3] >= 128, :3]
-
-
-def build_palette(
-    sprites: Iterable[Image.Image], photos: Iterable[Image.Image], size: int = COLOURS
-) -> np.ndarray:
-    """Builds the palette: every sprite colour, then photo colours up to size.
-
-    Args:
-        sprites: Sprites whose colours are all kept.
-        photos: Photo targets the remaining colours are picked from by median cut.
-        size: Maximum number of opaque colours in the palette.
-
-    Returns:
-        A (n, 3) uint8 array of distinct colours, n <= size, sorted. Token i is
-        colour i - 1.
-
-    Raises:
-        ValueError: If the sprites alone use more than size colours.
-    """
-    kept = np.unique(np.concatenate([opaque_pixels(s) for s in sprites]), axis=0)
-    if len(kept) > size:
-        raise ValueError(f"sprites use {len(kept)} colours, more than {size}")
-    pixels = np.concatenate([opaque_pixels(p) for p in photos])
-    free = size - len(kept)
-    strip = Image.fromarray(pixels.reshape(1, -1, 3))
-    picked = strip.quantize(free, method=Image.Quantize.MEDIANCUT, kmeans=3)
-    picked_palette = picked.getpalette()
-    if picked_palette is None:
-        raise ValueError("quantization produced no palette")
-    extra = np.array(picked_palette[: 3 * free], np.uint8).reshape(-1, 3)
-    return np.unique(np.concatenate([kept, extra]), axis=0)
 
 
 def encode(image: Image.Image, palette: np.ndarray) -> np.ndarray:
@@ -103,7 +39,7 @@ def encode(image: Image.Image, palette: np.ndarray) -> np.ndarray:
     colours, inverse = np.unique(
         rgba[..., :3].reshape(-1, 3), axis=0, return_inverse=True
     )
-    # TODO: Compare Oklab distance for photos and sprite colours absent from the palette.
+    # TODO: Compare Oklab distance for sprite colours absent from the palette.
     distance = ((colours[:, None].astype(np.int32) - palette[None]) ** 2).sum(axis=-1)
     nearest = (distance.argmin(axis=1) + 1).astype(np.uint8)
     tokens = nearest[inverse.reshape(-1)].reshape(rgba.shape[:2])
@@ -128,69 +64,7 @@ def decode(tokens: np.ndarray, palette: np.ndarray) -> Image.Image:
     return Image.fromarray(rgba)
 
 
-def save_palette(palette: np.ndarray, path: Traversable = PALETTE) -> None:
-    """Writes the palette; by default over the package's own palette.json."""
-    data = {"transparent": TRANSPARENT, "colours": palette.tolist()}
-    _ = Path(str(path)).write_text(json.dumps(data), encoding="utf-8")
-
-
 def load_palette(path: Traversable = PALETTE) -> np.ndarray:
     """Reads the palette; token i (1..n) is colours[i - 1]."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return np.array(data["colours"], np.uint8)
-
-
-def parse_args() -> Args:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    _ = parser.add_argument(
-        "--photos",
-        type=int,
-        default=Args.photos,
-        help="photo targets sampled for the extra colours",
-    )
-    return parser.parse_args(namespace=Args())
-
-
-def main() -> None:
-    args = parse_args()
-    sprite_data = cast(Any, load_dataset(REPO, "sprites"))
-    sprites = [
-        row["image"]
-        for split in sprite_data.values()
-        for row in split.select_columns(["image"])
-    ]
-    # Train split only, so test photos do not shape the palette.
-    photos = cast(Any, load_dataset(REPO, "photos", split="train")).select_columns(
-        ["target"]
-    )
-    sample = [
-        row["target"] for row in photos.shuffle(seed=0).select(range(args.photos))
-    ]
-    palette = build_palette(sprites, sample)
-    save_palette(palette)
-    print(f"saved {len(palette)} colours to {PALETTE}")
-
-    # Check: every sprite pixel comes back exactly; photos lose a little colour.
-    exact = 0
-    for sprite in sprites:
-        original = np.asarray(sprite.convert("RGBA"))
-        back = np.asarray(decode(encode(sprite, palette), palette))
-        opaque = original[..., 3] >= 128
-        exact += np.array_equal(opaque, back[..., 3] > 0) and np.array_equal(
-            original[opaque, :3], back[opaque, :3]
-        )
-    errors = [
-        np.abs(
-            np.asarray(p.convert("RGB"), np.int32)
-            - np.asarray(decode(encode(p, palette), palette).convert("RGB"), np.int32)
-        ).mean()
-        for p in sample
-    ]
-    print(f"sprites encoded exactly: {exact}/{len(sprites)}")
-    print(f"photo targets: mean error {np.mean(errors):.2f} per channel (0-255)")
-
-
-if __name__ == "__main__":
-    main()

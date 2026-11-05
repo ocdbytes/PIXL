@@ -163,6 +163,7 @@ def style_of(row: dict[str, str]) -> str:
 
 
 def slot_size(style: str) -> int:
+    # For kenny_pico-8 we have 8x8 tiles so we get a 4x4 grid of scenes.
     return 8 if style == "kenney_pico-8-city" else 16
 
 
@@ -301,7 +302,11 @@ def caption(
             f"{'left' if column < half else 'right'}"
             for sprite, (row, column) in placed
         ]
-        text = phrases[0] if len(phrases) == 1 else f"{', '.join(phrases[:-1])} and {phrases[-1]}"
+        text = (
+            phrases[0]
+            if len(phrases) == 1
+            else f"{', '.join(phrases[:-1])} and {phrases[-1]}"
+        )
     return f"{text} on {ground}" if ground else text
 
 
@@ -559,7 +564,12 @@ def main() -> None:
             args.test // 2, "new sprites", test_objects, backgrounds, rng, args.four
         ),
         make_scenes(
-            args.test - args.test // 2, "new pair", train_objects, backgrounds, rng, args.four
+            args.test - args.test // 2,
+            "new pair",
+            train_objects,
+            backgrounds,
+            rng,
+            args.four,
         ),
     )
 
@@ -576,7 +586,9 @@ def main() -> None:
             print(f"{n + 1:,} scenes")
     # Row i of the manifest is tokens[i].
     np.save(OUTPUT.joinpath("tokens.npy"), tokens)
-    with OUTPUT.joinpath("manifest.csv").open("w", newline="", encoding="utf-8") as file:
+    with OUTPUT.joinpath("manifest.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)

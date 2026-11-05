@@ -15,7 +15,7 @@ Data lives in `downloaded-data/` (sprites) and `scene-data/` (scenes), and model
 
 ## The package
 
-`uv sync` installs `src/pixl/` as the `pixl` package, built by `uv_build`, so `import pixl` works from any directory. [`palette.json`](../src/pixl/palette.json) and [`tokenizer.json`](../src/pixl/tokenizer.json) ship inside it and load through `importlib.resources`; rebuilding the palette or tokenizer writes over the package's own file. The scripts in `scripts/` run from the project root (`uv run python -m scripts.scenes.generate`) and import `pixl` like any other package.
+`uv sync` installs `src/pixl/` as the `pixl` package, built by `uv_build`, so `import pixl` works from any directory. [`palette.json`](../src/pixl/palette.json) and [`tokenizer.json`](../src/pixl/tokenizer.json) ship inside it and load through `importlib.resources`; the palette is fixed, and rebuilding the tokenizer writes over the package's own file. The scripts in `scripts/` run from the project root (`uv run python -m scripts.scenes.generate`) and import `pixl` like any other package.
 
 ## Dependencies
 

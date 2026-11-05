@@ -15,10 +15,6 @@ Sprite images retain their original file bytes. Scenes are kept locally as
 palette tokens: a push encodes each as a PNG, and a pull turns the PNGs back into
 the same tokens when using the same palette.
 scripts/hub/card.md becomes the dataset card.
-
-The repo also holds a photos config, which the palette build reads. It is no
-longer built here, and a push leaves it as it is; the scripts that built and
-filtered it are in the Git history before November 2026.
 """
 
 from __future__ import annotations
@@ -184,7 +180,7 @@ def push(repo: str, parts: list[Part]) -> None:
             splits[name] = dataset
         sizes = ", ".join(f"{name} {len(data)}" for name, data in splits.items())
         print(f"pushing {part.name} ({sizes}) to {repo}")
-        _ = splits.push_to_hub(repo, config_name=part.name, private=True)
+        _ = splits.push_to_hub(repo, config_name=part.name)
     push_card(repo)
 
 

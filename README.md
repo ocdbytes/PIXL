@@ -1,8 +1,41 @@
+![Pixl: 16 scenes drawn by the model](docs/poster.png)
+
+*16 scenes drawn by pixl from their captions, in one batch: seed 0, temperature 0.7, top-k 32, guidance 3.*
+
 # pixl
 
 Pixl is a text-to-pixel-art model. It draws a 32×32 image one pixel at a time from a caption, with an encoder-decoder Transformer trained from scratch. It learns from a million generated scenes, each with four sprites in the four quadrants of the image and a caption that says which sprite is where.
 
-## Quick start
+## Draw a scene
+
+The trained model is on the Hugging Face Hub as [`ocdbytes/pixl`](https://huggingface.co/ocdbytes/pixl). Install the package, then load it with `load_pretrained()`:
+
+```bash
+pip install git+https://github.com/ocdbytes/PIXL
+```
+
+```python
+import torch
+from PIL import Image
+
+from pixl.model import encode_captions
+from pixl.preprocess import decode, load_palette
+from pixl.tokenizer import Tokenizer
+from pixl.train import load_pretrained
+
+model = load_pretrained()  # load_pretrained(bf16=True) downloads the half-size copy
+torch.manual_seed(0)
+caption = ("a purple robed wizard at the top left, a closed treasure chest at the top right, "
+           "a brown bat at the bottom left and a red potion at the bottom right on a dark dungeon floor")
+ids = encode_captions([caption], Tokenizer.load(), length=model.config.caption)
+pixels = model.generate(ids, temperature=0.7, top_k=32, guidance=3.0)
+image = decode(pixels.view(32, 32).numpy(), load_palette())
+image.resize((256, 256), Image.Resampling.NEAREST).save("scene.png")
+```
+
+A caption names four objects from one sprite pack, each with its quadrant, then the ground, as in training. The [model card](https://huggingface.co/ocdbytes/pixl) lists what the model knows and its limits, and [`notebooks/generate.ipynb`](notebooks/generate.ipynb) has more prompts.
+
+## Train
 
 ```bash
 uv sync

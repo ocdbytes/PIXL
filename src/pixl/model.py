@@ -19,7 +19,6 @@ starts with a learned start token instead of a caption prefix.
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -49,7 +48,6 @@ class Config:
         recompute: In training, keep only each block's input, output and dropout
             mask, and recompute the rest in the backward pass (gradient
             checkpointing): about a third more compute for far less memory.
-            EncoderPixl needs it at batch 32 on a 24 GB Mac.
         cross_attention: Give every block an attention from its tokens to the
             caption's tokens (CrossAttention); EncoderPixl provides them.
         encoder_layers: Blocks of EncoderPixl's caption encoder; other models
@@ -145,6 +143,8 @@ class Block(nn.Module):
         self.qkv = nn.Linear(config.width, 3 * config.width)
         self.project = nn.Linear(config.width, config.width)
         self.mlp_norm = nn.LayerNorm(config.width)
+        # Used by position, so keep this order: mlp[:-1] is the MLP (parts), mlp[-1] its
+        # dropout (forward), and mlp[2] its output layer (Pixl.__init__).
         self.mlp = nn.Sequential(
             nn.Linear(config.width, 4 * config.width),
             nn.GELU(),
@@ -174,10 +174,13 @@ class Block(nn.Module):
         if self.recompute and self.training and cache is None:
             # Keep dropout outside checkpoint replay: earlier Apple GPU runs
             # replayed its masks incorrectly and produced different gradients.
+            # * checkpointing uses less memory while training but training takes longer than
+            # the alternate without checkpojnt
             x, update = checkpoint(self.parts, x, None, memory, use_reentrant=False)
         else:
             x, update = self.parts(x, cache, memory)
-        # Apply dropout to the MLP update, then add it to the residual stream.
+        # Dropout is applied here: mlp[-1] is the Dropout, applied to the MLP update before
+        # it is added to the residual stream.
         return x + self.mlp[-1](update)
 
     def parts(
@@ -207,6 +210,7 @@ class Block(nn.Module):
         x = x + self.project(attended.transpose(1, 2).reshape(batch, length, width))
         if self.cross is not None and memory is not None:
             x = x + self.cross(x, memory, cache)
+        # mlp[:-1] is the MLP without its dropout, which forward applies.
         return x, self.mlp[:-1](self.mlp_norm(x))
 
 
@@ -236,6 +240,7 @@ class Pixl(nn.Module):
         # close to the identity however many layers it has.
         for module in self.blocks:
             block = cast(Block, module)
+            # mlp[2] is the MLP's output layer.
             for layer in (block.project, cast(nn.Linear, block.mlp[2])):
                 nn.init.normal_(layer.weight, std=0.02 / math.sqrt(2 * config.layers))
             if block.cross is not None:
@@ -406,36 +411,31 @@ class EncoderPixl(Pixl):
         return self.start.expand(captions.shape[0], 1, -1)
 
 
-def encode_captions(
-    texts: list[str],
-    tokenizer: Tokenizer | None,
-    drop: float = 0.0,
-    length: int = Config.caption,
-    rng: random.Random | None = None,
-) -> Tensor:
+def encode_captions(texts: list[str], tokenizer: Tokenizer | None, length: int) -> Tensor:
     """Turns captions into the left-padded caption slot.
 
     Args:
-        texts: Captions.
+        texts: Captions; "" gives the empty caption.
         tokenizer: Caption tokenizer; None is allowed when every text is empty.
-        drop: Chance of replacing each caption with the empty caption, so the
-            model also learns unconditioned images (for classifier-free guidance).
-        length: Slot length; longer captions keep their first words.
-        rng: Source of the drop decisions, so a run can save and restore it; the
-            random module's by default. Nothing is drawn when drop is 0.
+        length: Slot length, <bos> and <eos> included: the model's config.caption.
 
     Returns:
         (len(texts), length) ids: <pad>..., <bos>, caption, <eos>.
+
+    Raises:
+        ValueError: If a caption needs more than length slots, or a non-empty
+            caption comes without a tokenizer.
     """
-    chance = (rng or random).random
     rows: list[list[int]] = []
     for text in texts:
-        if text and (drop == 0 or chance() >= drop):
-            if tokenizer is None:
-                raise ValueError("tokenizer is required for non-empty captions")
-            ids = tokenizer.encode(text)
-        else:
+        if not text:
             ids = []
-        ids = [BOS, *ids[: length - 2], EOS]
+        elif tokenizer is None:
+            raise ValueError("tokenizer is required for non-empty captions")
+        else:
+            ids = tokenizer.encode(text)
+        if len(ids) + 2 > length:
+            raise ValueError(f"caption needs {len(ids) + 2} slots, more than {length}: {text!r}")
+        ids = [BOS, *ids, EOS]
         rows.append([PAD] * (length - len(ids)) + ids)
     return torch.tensor(rows)

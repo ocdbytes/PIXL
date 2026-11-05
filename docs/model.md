@@ -4,20 +4,11 @@ Pixl represents captions and 32×32 images as token sequences, then uses an enco
 
 ## Image palette
 
-[`preprocess.py`](../src/pixl/preprocess.py) builds [`palette.json`](../src/pixl/palette.json). Token `0` is transparent and tokens `1–255` are colours, so each pixel fits in one byte.
+[`preprocess.py`](../src/pixl/preprocess.py) turns images into tokens and back with [`palette.json`](../src/pixl/palette.json). Token `0` is transparent and tokens `1–255` are colours, so each pixel fits in one byte.
 
-| Colours | Source | Result |
-|---|---|---|
-| 210 | Every sprite colour of the first 5,685 sprites | Those sprites encode pixel-exactly; later packs, such as Dungeon Crawl, snap to the nearest colour |
-| 45 | Median cut over 5,000 train-split photo targets | Mean photo error is 6.7 per RGB channel |
+The palette is fixed, because trained models and cached tokens depend on it. It holds every colour of the first 5,685 sprites (210 colours), which encode pixel-exactly, and 45 more picked by median cut from images that are no longer in the dataset. Sprite packs added later, such as Dungeon Crawl, snap to the nearest colour. The script that built it was removed with those images; it is in the Git history before November 2026.
 
-`encode()` maps opaque pixels to their nearest palette colour without dithering; `decode()` converts token grids back to RGBA. The bundled palette was built before the later sprite packs were added. The builder tries to preserve every source sprite colour and raises `ValueError` if those colours exceed its 255 opaque-colour slots. Rebuilding the palette makes it incompatible with existing models and caches, so do it only before training from scratch:
-
-```bash
-uv run python -m pixl.preprocess
-```
-
-It reads the sprites and the `photos` config from the Hugging Face dataset.
+`encode()` maps opaque pixels to their nearest palette colour without dithering; `decode()` converts token grids back to RGBA.
 
 ## Caption tokenizer
 
@@ -35,7 +26,7 @@ It reads the sprites and the `photos` config from the Hugging Face dataset.
 | 3–258 | 256 byte values |
 | 259–1023 | 765 learned merges |
 
-Decoding an encoded caption returns its lowercase text with whitespace normalised. The following measurements come from the earlier photo, sprite and one/two-object scene corpus: captions averaged 2.5 tokens for photos, 4.5 for sprites, and 12 for scenes, with a maximum of 28. They do not describe the current four-object scenes.
+Decoding an encoded caption returns its lowercase text with whitespace normalised. The bundled tokenizer was trained on an earlier caption set: sprite labels, the one/two-object scenes, and captions since removed from the dataset. The measurements below come from that set, where sprite labels averaged 4.5 tokens and scene captions 12, with a maximum of 28. They do not describe the current four-object scenes; rebuilding the tokenizer trains it on the current sprite labels and scene captions.
 
 | Vocabulary | Single-token words | Share of word uses | Longest historical scene caption |
 |---|---:|---:|---:|

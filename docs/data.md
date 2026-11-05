@@ -8,27 +8,22 @@ Training reads the public Hugging Face dataset [`ocdbytes/pixl-data`](https://hu
 |---|---:|---:|---|
 | `scenes` | 1,000,000 | 2,000 | 32×32 scenes of four sprites, with captions naming each sprite's quadrant; [made here](#scenes) |
 | `sprites` | 10,361 | 1,158 | Labelled sprites from approved packs ([`sources.md`](../sources.md)) |
-| `photos` | 82,651 | 1,639 | Photo pairs, read only by the palette build ([model.md](model.md#image-palette)) |
 
 These counts describe the current dataset snapshot; rebuilding and pushing a config can change them. [`scripts/hub/card.md`](../scripts/hub/card.md) is the dataset card on the Hub, with every column and licence.
 
-The `photos` config is no longer built in this repo, and a push leaves it untouched; the scripts that downloaded and filtered the photos are in the Git history before November 2026.
-
 ## Loading
 
-[`data.py`](../src/pixl/data.py) loads a config as captions and 32×32 token grids. Photo targets and scenes are already 32×32; sprites are centred on a transparent canvas and oversized sprites are skipped. Encoded tokens are cached by the `datasets` library. `keep` names other text columns to keep, such as a scene's `kind` and `swapped` caption.
+[`data.py`](../src/pixl/data.py) loads the scenes as captions and 32×32 token grids, cached by the `datasets` library. `keep` names other text columns to keep, such as a scene's `kind` and `swapped` caption. The package does not load the `sprites` config; the scene generator reads the local sprite files.
 
 ```python
-from pixl.data import load, loader
+from pixl.data import load
 
-for batch in loader("photos", "train", batch_size=64):
-    batch["caption"]  # 64 strings
-    batch["tokens"]   # (64, 32, 32) int64 palette tokens
-
-test = load("scenes", "test", keep=("kind", "swapped"))
+test = load("test", keep=("kind", "swapped"))[:]
+test["caption"]  # 2,000 strings
+test["tokens"]   # (2000, 32, 32) uint8 palette tokens
 ```
 
-The first photo load downloads about 2.4 GB into the Hugging Face cache, and the first scene load about 1 GB. The first load also encodes every image into tokens: splits of 100,000 rows or more (`PARALLEL_ROWS`) use every core the process may use, and smaller splits one process, since starting workers costs more than it saves. `num_proc` overrides this. The rows keep their order either way.
+The first load downloads about 1 GB into the Hugging Face cache. It also encodes every image into tokens: splits of 100,000 rows or more (`PARALLEL_ROWS`) use every core the process may use, and smaller splits one process, since starting workers costs more than it saves. `num_proc` overrides this. The rows keep their order either way.
 
 ## Scenes
 

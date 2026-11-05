@@ -30,18 +30,22 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import json
 import math
 import os
 import random
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from PIL import Image
+from safetensors.torch import load_file
 from torch.nn import functional as F
 
 from .data import load
@@ -60,6 +64,8 @@ EVAL_SCENES = 4  # Full runs: every fourth scene during training, all scenes at 
 EVAL_BATCH = 64
 TEMPERATURE, GUIDANCE = 0.7, 3.0  # for the preview samples
 SEED = 0
+# The published model on the Hugging Face Hub.
+MODEL_REPO = "ocdbytes/pixl"
 
 
 @dataclass
@@ -148,6 +154,280 @@ def load_model(path: Path, device: str = "cpu") -> tuple[EncoderPixl, dict[str, 
     return model, state
 
 
+def load_pretrained(repo: str = MODEL_REPO, bf16: bool = False, device: str = "cpu") -> EncoderPixl:
+    """Downloads a published model from the Hugging Face Hub.
+
+    Args:
+        repo: Model repo id.
+        bf16: Download the half-size bf16 copy of the weights instead of the
+            float32 ones. Either way the model computes in float32.
+        device: Where to put the model.
+
+    Returns:
+        The model in eval mode.
+
+    Raises:
+        ValueError: If the repo's tokenizer or palette differs from this package's,
+            which the model's inputs and outputs depend on.
+    """
+    for name, bundled in (("tokenizer.json", TOKENIZER), ("palette.json", PALETTE)):
+        if Path(hf_hub_download(repo, name)).read_bytes() != bundled.read_bytes():
+            raise ValueError(f"{repo}'s {name} differs from the one in this pixl package")
+    config = json.loads(Path(hf_hub_download(repo, "config.json")).read_text(encoding="utf-8"))
+    model = EncoderPixl(Config(**config))
+    # load_state_dict copies bf16 values into the float32 parameters.
+    model.load_state_dict(load_file(hf_hub_download(repo, "model-bf16.safetensors" if bf16 else "model.safetensors")))
+    return model.to(device).eval()
+
+
+@dataclass
+class EvalScenes:
+    """The evaluation pool: TRAIN_EVAL train scenes, then every test scene.
+
+    Attributes:
+        tokens: (n, 32, 32) palette tokens.
+        captions: Each scene's caption.
+        swapped: Each caption with its first two objects' quadrants exchanged.
+        kinds: Each scene's kind, one of KINDS.
+    """
+
+    tokens: torch.Tensor
+    captions: list[str]
+    swapped: list[str]
+    kinds: np.ndarray
+
+    @property
+    def preview(self) -> list[int]:
+        """The scenes drawn at every evaluation: the first 4 train scenes and the first 4 new pairs."""
+        return [int(i) for kind in ("train", "new pair") for i in np.flatnonzero(self.kinds == kind)[:4]]
+
+
+def load_scenes(quick: bool) -> tuple[dict[str, Any], EvalScenes, dict[str, str]]:
+    """Loads the train scenes and the evaluation pool, and fingerprints the inputs.
+
+    Args:
+        quick: Use the first 2,000 train scenes instead of all of them.
+
+    Returns:
+        The train split's columns ("tokens", "caption", "swapped"), the evaluation
+        pool, and short SHA-256s of the data, tokenizer and palette.
+    """
+    train_set = load("train[:2000]" if quick else "train", keep=("swapped",))[:]
+    test_set = load("test", keep=("kind", "swapped"))[:]
+    tokens, captions = train_set["tokens"], train_set["caption"]
+    picked = np.sort(np.random.default_rng(SEED).choice(len(captions), min(TRAIN_EVAL, len(captions)), replace=False))
+    scenes = EvalScenes(
+        tokens=torch.cat([tokens[torch.from_numpy(picked)], test_set["tokens"]]),
+        captions=[captions[i] for i in picked] + test_set["caption"],
+        swapped=[train_set["swapped"][i] for i in picked] + test_set["swapped"],
+        kinds=np.array(["train"] * len(picked) + test_set["kind"]),
+    )
+    fingerprints = {
+        "data": fingerprint(
+            np.ascontiguousarray(tokens.numpy()).data, np.ascontiguousarray(test_set["tokens"].numpy()).data,
+            "\n".join(captions + train_set["swapped"] + test_set["caption"] + test_set["swapped"] + test_set["kind"]).encode(),
+        ),
+        "tokenizer": fingerprint(TOKENIZER.read_bytes()),
+        "palette": fingerprint(PALETTE.read_bytes()),
+    }
+    return train_set, scenes, fingerprints
+
+
+def build(device: str, peak_lr: float) -> tuple[EncoderPixl, torch.optim.AdamW]:
+    """A new model, and AdamW with weight decay on its matrices and embeddings only.
+
+    PyTorch is seeded first, so the same seed gives the same initial weights.
+
+    Args:
+        device: Where to put the model.
+        peak_lr: The optimizer's starting learning rate; training sets it every step.
+    """
+    torch.manual_seed(SEED)
+    # Recompute (gradient checkpointing): batch 32 in float32 runs out of a 24 GB Mac's GPU memory without it.
+    model = EncoderPixl(Config(caption=CAPTION, recompute=device != "cuda")).to(device)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": [p for p in model.parameters() if p.dim() >= 2], "weight_decay": WEIGHT_DECAY},
+            {"params": [p for p in model.parameters() if p.dim() < 2], "weight_decay": 0.0},
+        ],
+        lr=peak_lr,
+        betas=(0.9, 0.95),
+    )
+    return model, optimizer
+
+
+def learning_rate(step: int, steps: int, warmup: int, peak: float, low: float) -> float:
+    """Linear warm-up to the peak rate, then cosine decay to the low rate at the last step."""
+    if step < warmup:
+        return peak * (step + 1) / warmup
+    progress = min(1.0, (step - warmup) / max(1, steps - warmup))
+    return low + 0.5 * (peak - low) * (1 + math.cos(math.pi * progress))
+
+
+def batch_loss(
+    model: EncoderPixl,
+    encode: Callable[[list[str]], torch.Tensor],
+    texts: list[str],
+    pixels: torch.Tensor,
+    margin: float,
+    rng: random.Random,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The training loss of one batch: pixel loss plus the position margin.
+
+    Args:
+        model: The model, in training mode.
+        encode: Turns captions into caption ids on the model's device.
+        texts: Each scene's caption; "" where caption dropout emptied it.
+        pixels: (batch, pixels) pixel tokens on the model's device.
+        margin: Nats per scene each kept caption's loss must stay below that of
+            the same caption with two random objects' places exchanged; 0 skips
+            the exchanged captions.
+        rng: Picks the objects whose places are exchanged.
+
+    Returns:
+        The loss to minimise, and the true captions' mean pixel loss alone.
+    """
+    kept = [i for i, text in enumerate(texts) if text] if margin else []
+    both = torch.cat([pixels, pixels[kept]])
+    device = pixels.device.type
+    # bf16 on NVIDIA GPUs: faster matrix multiplies and half the activation memory.
+    with torch.autocast(device, torch.bfloat16, enabled=device == "cuda"):
+        scene_losses = model.loss(encode(texts + [swap_places(texts[i], rng) for i in kept]), both)
+    right, wrong = scene_losses[: len(texts)], scene_losses[len(texts) :]
+    # The margin is in nats per scene and the losses per pixel; dropped captions add 0.
+    gap = (wrong - right[kept]) * pixels.shape[1]
+    pixel_loss = right.mean()
+    return pixel_loss + F.relu(margin - gap).sum() / (pixels.shape[1] * len(texts)), pixel_loss
+
+
+@torch.no_grad()
+def losses(model: EncoderPixl, encode: Callable[[list[str]], torch.Tensor], tokens: torch.Tensor, texts: list[str]) -> torch.Tensor:
+    """(n,) mean loss per pixel of scene i under texts[i], in batches of EVAL_BATCH, on the CPU."""
+    device = next(model.parameters()).device
+    result = []
+    for start in range(0, len(texts), EVAL_BATCH):
+        pixels = tokens[start : start + EVAL_BATCH].flatten(1).long().to(device)
+        result.append(model.loss(encode(texts[start : start + EVAL_BATCH]), pixels).cpu())
+    return torch.cat(result)
+
+
+def scores(
+    model: EncoderPixl, encode: Callable[[list[str]], torch.Tensor], scenes: EvalScenes, every: int
+) -> dict[str, float]:
+    """Loss, and how often the true caption beats the swapped one (chance 0.5), per kind.
+
+    Args:
+        model: The model; in eval mode while scoring, then back in training mode.
+        encode: Turns captions into caption ids on the model's device.
+        scenes: The evaluation pool.
+        every: Scores every this many-th scene of the pool.
+
+    Returns:
+        "<kind> loss" and "<kind> position" for each kind in KINDS.
+    """
+    rows = list(range(0, len(scenes.kinds), every))
+    tokens = scenes.tokens[rows]
+    model.eval()
+    right = losses(model, encode, tokens, [scenes.captions[i] for i in rows])
+    wrong = losses(model, encode, tokens, [scenes.swapped[i] for i in rows])
+    model.train()
+    kinds = scenes.kinds[rows]
+    result = {}
+    for kind in KINDS:
+        mask = torch.from_numpy(kinds == kind)
+        result[f"{kind} loss"] = right[mask].mean().item()
+        result[f"{kind} position"] = (right[mask] < wrong[mask]).float().mean().item()
+    return result
+
+
+def describe(point: dict[str, float]) -> str:
+    """Each kind's loss and position from scores(), as one log line part."""
+    return " | ".join(f"{kind} loss {point[f'{kind} loss']:.3f} pos {point[f'{kind} position']:.3f}" for kind in KINDS)
+
+
+@torch.no_grad()
+def samples(model: EncoderPixl, encode: Callable[[list[str]], torch.Tensor], texts: list[str]) -> np.ndarray:
+    """(len(texts), 32, 32) samples at TEMPERATURE and GUIDANCE, from a fixed seed.
+
+    The random states are forked, so sampling never changes what training draws.
+    """
+    model.eval()
+    with torch.random.fork_rng():
+        torch.manual_seed(SEED)
+        images = model.generate(encode(texts), temperature=TEMPERATURE, top_k=32, guidance=GUIDANCE)
+    model.train()
+    return images.view(-1, 32, 32).cpu().numpy()
+
+
+def random_states(rng: random.Random, device: str) -> dict[str, Any]:
+    """The states of every random source training draws from."""
+    states: dict[str, Any] = {"python": rng.getstate(), "torch": torch.get_rng_state()}
+    if device == "cuda":
+        states["cuda"] = torch.cuda.get_rng_state_all()
+    elif device == "mps":
+        states["mps"] = torch.mps.get_rng_state()
+    return states
+
+
+def restore_random(states: dict[str, Any], rng: random.Random, device: str) -> None:
+    """Restores random_states(); a GPU state saved on another kind of device is skipped."""
+    rng.setstate(states["python"])
+    torch.set_rng_state(states["torch"])
+    if "cuda" in states and device == "cuda":
+        torch.cuda.set_rng_state_all(states["cuda"])
+    elif "mps" in states and device == "mps":
+        torch.mps.set_rng_state(states["mps"])
+
+
+def resume(
+    checkpoint: Path,
+    model: EncoderPixl,
+    optimizer: torch.optim.Optimizer,
+    rng: random.Random,
+    device: str,
+    expected: dict[str, dict[str, Any]],
+) -> tuple[int, list[dict[str, float]]]:
+    """Restores a run from its checkpoint, when it has one.
+
+    Args:
+        checkpoint: The run's checkpoint path.
+        model: Gets the saved weights.
+        optimizer: Gets the saved optimizer state.
+        rng: Gets the saved Python random state.
+        device: The training device.
+        expected: Checkpoint key ("settings", "fingerprints") -> its values now;
+            the saved values must match.
+
+    Returns:
+        The steps done and the log so far; 0 and [] without a checkpoint.
+
+    Raises:
+        SystemExit: If the checkpoint was made with other settings or inputs.
+    """
+    if not checkpoint.exists():
+        return 0, []
+    # On the CPU: the model and optimizer move their tensors to the device, and PyTorch
+    # takes the random states on the CPU.
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    for name, current in expected.items():
+        saved = state[name]
+        changed = {key: (saved.get(key), value) for key, value in current.items() if saved.get(key) != value}
+        if changed:
+            raise SystemExit(f"{checkpoint} was made with other {name} (saved, now): {changed}; use another --run")
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    restore_random(state["random"], rng, device)
+    print(f"resumed from {checkpoint} at step {state['step']:,}")
+    return state["step"], state["log"]
+
+
+def save(checkpoint: Path, state: dict[str, Any]) -> None:
+    """Writes a checkpoint through a temporary file, so a stop mid-write leaves the previous one whole."""
+    temporary = checkpoint.with_suffix(".tmp")
+    torch.save(state, temporary)
+    temporary.replace(checkpoint)
+
+
 def train(args: Args) -> Path:
     """Trains one run, or resumes it from its checkpoint.
 
@@ -166,7 +446,6 @@ def train(args: Args) -> Path:
     if device == "cuda":
         # Float32 matrix multiplies on the tensor cores (TF32); training itself runs in bf16.
         torch.backends.cuda.matmul.fp32_precision = "tf32"
-    eval_every, warmup, eval_scenes = (20, 10, 50) if args.quick else (args.eval_every, args.warmup, EVAL_SCENES)
     folder = run_folder(args)
     folder.mkdir(parents=True, exist_ok=True)
     checkpoint = folder.joinpath("checkpoint.pt")
@@ -174,156 +453,46 @@ def train(args: Args) -> Path:
     # Where the run is stored and what it runs on may change between resumes.
     settings = {key: value for key, value in vars(args).items() if key not in ("checkpoints", "device")}
 
-    # Full training uses every train scene; quick mode uses the first 2,000.
-    # Evaluation combines up to TRAIN_EVAL train scenes with every test scene.
-    train_set = load("scenes", "train[:2000]" if args.quick else "train", keep=("swapped",))[:]
-    test_set = load("scenes", "test", keep=("kind", "swapped"))[:]
+    train_set, scenes, fingerprints = load_scenes(args.quick)
     tokens, captions = train_set["tokens"], train_set["caption"]
-    picked = np.sort(np.random.default_rng(SEED).choice(len(captions), min(TRAIN_EVAL, len(captions)), replace=False))
-    eval_tokens = torch.cat([tokens[torch.from_numpy(picked)], test_set["tokens"]])
-    eval_captions = [captions[i] for i in picked] + test_set["caption"]
-    eval_swapped = [train_set["swapped"][i] for i in picked] + test_set["swapped"]
-    eval_kinds = np.array(["train"] * len(picked) + test_set["kind"])
-    fingerprints = {
-        "data": fingerprint(
-            np.ascontiguousarray(tokens.numpy()).data, np.ascontiguousarray(test_set["tokens"].numpy()).data,
-            "\n".join(captions + train_set["swapped"] + test_set["caption"] + test_set["swapped"] + test_set["kind"]).encode(),
-        ),
-        "tokenizer": fingerprint(TOKENIZER.read_bytes()),
-        "palette": fingerprint(PALETTE.read_bytes()),
-    }
-    # The preview: 4 train scenes and 4 new pairs.
-    preview = [int(i) for kind in ("train", "new pair") for i in np.flatnonzero(eval_kinds == kind)[:4]]
-    steps = 40 if args.quick else args.epochs * len(captions) // args.batch
+    # Quick mode: 40 steps, 10 of them warm-up, scoring every 50th scene every 20 steps and at the end.
+    steps, warmup, eval_every, eval_scenes, final_scenes = (
+        (40, 10, 20, 50, 50) if args.quick
+        else (args.epochs * len(captions) // args.batch, args.warmup, args.eval_every, EVAL_SCENES, 1)
+    )
     shuffle = torch.Generator().manual_seed(SEED)
     order = torch.cat([torch.randperm(len(captions), generator=shuffle) for _ in range(args.epochs)])
-
     tokenizer = Tokenizer.load()
-    torch.manual_seed(SEED)
     rng = random.Random(SEED)  # caption dropout and place swaps
-    # Recompute (gradient checkpointing): batch 32 in float32 runs out of a 24 GB Mac's GPU memory without it.
-    model = EncoderPixl(Config(caption=CAPTION, recompute=device != "cuda")).to(device)
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": [p for p in model.parameters() if p.dim() >= 2], "weight_decay": WEIGHT_DECAY},
-            {"params": [p for p in model.parameters() if p.dim() < 2], "weight_decay": 0.0},
-        ],
-        lr=args.peak_lr,
-        betas=(0.9, 0.95),
-    )
+    model, optimizer = build(device, args.peak_lr)
     print(f"device {device} | {len(captions):,} train scenes | {steps:,} steps of {args.batch} | "
           f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters | {folder} | {fingerprints}")
+    step, log = resume(checkpoint, model, optimizer, rng, device, {"settings": settings, "fingerprints": fingerprints})
 
-    def learning_rate(step: int) -> float:
-        """Linear warm-up to the peak rate, then cosine decay to the minimum at the last step."""
-        if step < warmup:
-            return args.peak_lr * (step + 1) / warmup
-        progress = min(1.0, (step - warmup) / max(1, steps - warmup))
-        return args.min_lr + 0.5 * (args.peak_lr - args.min_lr) * (1 + math.cos(math.pi * progress))
-
-    def ids(texts: list[str]) -> torch.Tensor:
+    def encode(texts: list[str]) -> torch.Tensor:
         """(len(texts), CAPTION) caption ids on the device."""
         return encode_captions(texts, tokenizer, length=CAPTION).to(device)
 
-    @torch.no_grad()
-    def losses(texts: list[str], rows: list[int]) -> torch.Tensor:
-        """(n,) mean loss per pixel of evaluation scene rows[i] under texts[i], on the CPU."""
-        result = []
-        for start in range(0, len(rows), EVAL_BATCH):
-            pixels = eval_tokens[rows[start : start + EVAL_BATCH]].flatten(1).long().to(device)
-            result.append(model.loss(ids(texts[start : start + EVAL_BATCH]), pixels).cpu())
-        return torch.cat(result)
+    preview = scenes.preview
+    preview_set = {"captions": [scenes.captions[i] for i in preview], "swapped": [scenes.swapped[i] for i in preview],
+                   "tokens": scenes.tokens[preview]}
 
-    def scores(every: int) -> dict[str, float]:
-        """Loss, and how often the true caption beats the swapped one (chance 0.5), per kind."""
-        model.eval()
-        rows = list(range(0, len(eval_kinds), every))
-        right = losses([eval_captions[i] for i in rows], rows)
-        wrong = losses([eval_swapped[i] for i in rows], rows)
-        model.train()
-        kinds = eval_kinds[rows]
-        result = {}
-        for kind in KINDS:
-            mask = torch.from_numpy(kinds == kind)
-            result[f"{kind} loss"] = right[mask].mean().item()
-            result[f"{kind} position"] = (right[mask] < wrong[mask]).float().mean().item()
-        return result
-
-    @torch.no_grad()
-    def samples(texts: list[str]) -> np.ndarray:
-        """(len(texts), 32, 32) samples at TEMPERATURE and GUIDANCE, from a fixed seed.
-
-        The random states are forked, so sampling never changes what training draws.
-        """
-        model.eval()
-        with torch.random.fork_rng():
-            torch.manual_seed(SEED)
-            images = model.generate(ids(texts), temperature=TEMPERATURE, top_k=32, guidance=GUIDANCE)
-        model.train()
-        return images.view(-1, 32, 32).cpu().numpy()
-
-    def random_states() -> dict[str, Any]:
-        """The states of every random source training draws from."""
-        states: dict[str, Any] = {"python": rng.getstate(), "torch": torch.get_rng_state()}
-        if device == "cuda":
-            states["cuda"] = torch.cuda.get_rng_state_all()
-        elif device == "mps":
-            states["mps"] = torch.mps.get_rng_state()
-        return states
-
-    log: list[dict[str, float]] = []
-    step = 0
-    if checkpoint.exists():
-        # On the CPU: the model and optimizer move their tensors to the device, and PyTorch
-        # takes the random states on the CPU.
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        for name, saved, current in (("settings", state["settings"], settings), ("inputs", state["fingerprints"], fingerprints)):
-            changed = {key: (saved.get(key), value) for key, value in current.items() if saved.get(key) != value}
-            if changed:
-                raise SystemExit(f"{checkpoint} was made with other {name} (saved, now): {changed}; use another --run")
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        step, log = state["step"], state["log"]
-        states = state["random"]
-        rng.setstate(states["python"])
-        torch.set_rng_state(states["torch"])
-        if "cuda" in states and device == "cuda":
-            torch.cuda.set_rng_state_all(states["cuda"])
-        elif "mps" in states and device == "mps":
-            torch.mps.set_rng_state(states["mps"])
-        print(f"resumed from {checkpoint} at step {step:,}")
-
-    def save(**extra: object) -> None:
-        """Saves resume state and the logs/previews used by both notebooks."""
-        preview_set = {"captions": [eval_captions[i] for i in preview], "swapped": [eval_swapped[i] for i in preview],
-                       "tokens": eval_tokens[preview]}
-        # Write a temporary file, then rename it: a stop mid-write leaves the previous checkpoint whole.
-        temporary = checkpoint.with_suffix(".tmp")
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": asdict(model.config),
-                    "step": step, "log": log, "preview": preview_set, "settings": settings,
-                    "fingerprints": fingerprints, "random": random_states(), **extra}, temporary)
-        temporary.replace(checkpoint)
+    def state(**extra: object) -> dict[str, Any]:
+        """Everything a resume needs, plus the log and preview both notebooks read."""
+        return {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": asdict(model.config),
+                "step": step, "log": log, "preview": preview_set, "settings": settings,
+                "fingerprints": fingerprints, "random": random_states(rng, device), **extra}
 
     started, window, tick = time.time(), [], time.time()
     model.train()
     while step < steps:
         for group in optimizer.param_groups:
-            group["lr"] = learning_rate(step)
+            group["lr"] = learning_rate(step, steps, warmup, args.peak_lr, args.min_lr)
         rows = order[step * args.batch : (step + 1) * args.batch]
         pixels = tokens[rows].flatten(1).long().to(device)
-        # Caption dropout leaves some captions empty. With a margin, each kept caption is
-        # also scored with two of its objects' places exchanged.
+        # Caption dropout empties some captions, so samples can use guidance.
         texts = ["" if rng.random() < CAPTION_DROP else captions[i] for i in rows.tolist()]
-        kept = [i for i, text in enumerate(texts) if text] if args.margin else []
-        both = torch.cat([pixels, pixels[kept]])
-        # bf16 on NVIDIA GPUs: faster matrix multiplies and half the activation memory.
-        with torch.autocast(device, torch.bfloat16, enabled=device == "cuda"):
-            scene_losses = model.loss(ids(texts + [swap_places(texts[i], rng) for i in kept]), both)
-        right, wrong = scene_losses[: len(texts)], scene_losses[len(texts) :]
-        # The margin is in nats per scene and the losses per pixel; dropped captions add 0.
-        gap = (wrong - right[kept]) * pixels.shape[1]
-        pixel_loss = right.mean()
-        loss = pixel_loss + F.relu(args.margin - gap).sum() / (pixels.shape[1] * len(texts))
+        loss, pixel_loss = batch_loss(model, encode, texts, pixels, args.margin, rng)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
@@ -332,23 +501,22 @@ def train(args: Args) -> Path:
         step += 1
         if step % eval_every == 0 or step == steps:
             seconds = (time.time() - tick) / len(window)
-            point = {"step": step, "batch loss": sum(window) / len(window), "seconds per step": seconds} | scores(eval_scenes)
+            point = {"step": step, "batch loss": sum(window) / len(window), "seconds per step": seconds}
+            point |= scores(model, encode, scenes, eval_scenes)
             log.append(point)
-            parts = [f"step {step:,}", f"batch loss {point['batch loss']:.3f}"]
-            parts += [f"{kind} loss {point[f'{kind} loss']:.3f} pos {point[f'{kind} position']:.3f}" for kind in KINDS]
-            parts += [f"{seconds:.2f} s/step", f"elapsed {clock(time.time() - started)}", f"left {clock((steps - step) * seconds)}"]
-            print(" | ".join(parts), flush=True)
-            save_samples(folder.joinpath(f"samples-{step:06d}.png"),
-                         [eval_tokens[preview].numpy(), samples([eval_captions[i] for i in preview])], palette)
-            save()
+            print(" | ".join([f"step {step:,}", f"batch loss {point['batch loss']:.3f}", describe(point),
+                              f"{seconds:.2f} s/step", f"elapsed {clock(time.time() - started)}",
+                              f"left {clock((steps - step) * seconds)}"]), flush=True)
+            drawn = samples(model, encode, preview_set["captions"])
+            save_samples(folder.joinpath(f"samples-{step:06d}.png"), [preview_set["tokens"].numpy(), drawn], palette)
+            save(checkpoint, state())
             if device == "mps":
                 torch.mps.empty_cache()  # drop the cache the measures left behind
             window, tick = [], time.time()
 
-    final = scores(eval_scenes if args.quick else 1)
-    print("final evaluation scores: " + " | ".join(
-        f"{kind} loss {final[f'{kind} loss']:.3f} pos {final[f'{kind} position']:.3f}" for kind in KINDS))
-    save(final=final)
+    final = scores(model, encode, scenes, final_scenes)
+    print("final evaluation scores: " + describe(final))
+    save(checkpoint, state(final=final))
     return checkpoint
 
 
