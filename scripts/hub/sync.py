@@ -34,9 +34,9 @@ import PIL.Image
 from datasets import Dataset, DatasetDict, Image, load_dataset
 from huggingface_hub import DatasetCard
 
+from pixl.data import REPO
 from pixl.preprocess import decode, encode, load_palette
 
-REPO = "ocdbytes/pixl-data"
 CARD = Path("scripts/hub/card.md")
 
 

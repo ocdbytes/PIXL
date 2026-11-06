@@ -48,22 +48,20 @@ from PIL import Image
 from safetensors.torch import load_file
 from torch.nn import functional as F
 
-from .data import load
-from .model import Config, EncoderPixl, encode_captions
+from .data import PLACES, load
+from .model import GUIDANCE, TEMPERATURE, TOP_K, Config, EncoderPixl, encode_captions
 from .preprocess import PALETTE, decode, load_palette
 from .tokenizer import TOKENIZER, Tokenizer
 
 KINDS = ("train", "new sprites", "new pair")
 # Caption slot: the longest scene caption has 80 tokens, plus <bos> and <eos>.
 CAPTION = 96
-WEIGHT_DECAY = 0.1
-GRAD_CLIP = 1.0
-CAPTION_DROP = 0.1  # share of captions left empty, so samples can use guidance
 TRAIN_EVAL = 500  # train scenes among the evaluation scenes, next to every test scene
 EVAL_SCENES = 4  # Full runs: every fourth scene during training, all scenes at the end; quick runs use 50.
 EVAL_BATCH = 64
-TEMPERATURE, GUIDANCE = 0.7, 3.0  # for the preview samples
-SEED = 0
+# Picks the evaluated train scenes and seeds the preview samples, whatever --seed is, so every run
+# is measured on the same scenes.
+EVAL_SEED = 0
 # The published model on the Hugging Face Hub.
 MODEL_REPO = "ocdbytes/pixl"
 
@@ -81,10 +79,16 @@ class Args(argparse.Namespace):
     quick: bool = False
     device: str = "auto"
     margin: float = 2.0
+    seed: int = 0
+    caption_drop: float = 0.1
+    weight_decay: float = 0.1
+    beta1: float = 0.9
+    beta2: float = 0.95
+    grad_clip: float = 1.0
 
 
 # A place phrase; every scene caption has one per object.
-PLACES = re.compile(r"\bat the (?:top|bottom) (?:left|right)\b")
+PLACE_PHRASE = re.compile(rf"\bat the (?:{'|'.join(PLACES)})\b")
 
 
 def swap_places(caption: str, rng: random.Random) -> str:
@@ -97,11 +101,11 @@ def swap_places(caption: str, rng: random.Random) -> str:
     Returns:
         The caption with those two place phrases exchanged.
     """
-    places = PLACES.findall(caption)
+    places = PLACE_PHRASE.findall(caption)
     i, j = rng.sample(range(len(places)), 2)
     places[i], places[j] = places[j], places[i]
     swapped = iter(places)
-    return PLACES.sub(lambda _: next(swapped), caption)
+    return PLACE_PHRASE.sub(lambda _: next(swapped), caption)
 
 
 def pick_device(name: str = "auto") -> str:
@@ -215,7 +219,7 @@ def load_scenes(quick: bool) -> tuple[dict[str, Any], EvalScenes, dict[str, str]
     train_set = load("train[:2000]" if quick else "train", keep=("swapped",))[:]
     test_set = load("test", keep=("kind", "swapped"))[:]
     tokens, captions = train_set["tokens"], train_set["caption"]
-    picked = np.sort(np.random.default_rng(SEED).choice(len(captions), min(TRAIN_EVAL, len(captions)), replace=False))
+    picked = np.sort(np.random.default_rng(EVAL_SEED).choice(len(captions), min(TRAIN_EVAL, len(captions)), replace=False))
     scenes = EvalScenes(
         tokens=torch.cat([tokens[torch.from_numpy(picked)], test_set["tokens"]]),
         captions=[captions[i] for i in picked] + test_set["caption"],
@@ -233,31 +237,33 @@ def load_scenes(quick: bool) -> tuple[dict[str, Any], EvalScenes, dict[str, str]
     return train_set, scenes, fingerprints
 
 
-def build(device: str, peak_lr: float) -> tuple[EncoderPixl, torch.optim.AdamW]:
+def build(device: str, args: Args) -> tuple[EncoderPixl, torch.optim.AdamW]:
     """A new model, and AdamW with weight decay on its matrices and embeddings only.
 
     PyTorch is seeded first, so the same seed gives the same initial weights.
 
     Args:
         device: Where to put the model.
-        peak_lr: The optimizer's starting learning rate; training sets it every step.
+        args: The run's settings: seed, peak_lr (the starting learning rate; training
+            sets it every step), weight_decay, beta1 and beta2.
     """
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     # Recompute (gradient checkpointing): batch 32 in float32 runs out of a 24 GB Mac's GPU memory without it.
-    model = EncoderPixl(Config(caption=CAPTION, recompute=device != "cuda")).to(device)
+    model = EncoderPixl(Config(caption=CAPTION, recompute=device != "cuda", mask_padding=True)).to(device)
     optimizer = torch.optim.AdamW(
         [
-            {"params": [p for p in model.parameters() if p.dim() >= 2], "weight_decay": WEIGHT_DECAY},
+            {"params": [p for p in model.parameters() if p.dim() >= 2], "weight_decay": args.weight_decay},
             {"params": [p for p in model.parameters() if p.dim() < 2], "weight_decay": 0.0},
         ],
-        lr=peak_lr,
-        betas=(0.9, 0.95),
+        lr=args.peak_lr,
+        betas=(args.beta1, args.beta2),
     )
     return model, optimizer
 
 
 def learning_rate(step: int, steps: int, warmup: int, peak: float, low: float) -> float:
-    """Linear warm-up to the peak rate, then cosine decay to the low rate at the last step."""
+    """Linear warm-up to the peak rate by step warmup - 1, then cosine decay that reaches the low
+    rate at step `steps`, one past the last training step, which ends a hair above it."""
     if step < warmup:
         return peak * (step + 1) / warmup
     progress = min(1.0, (step - warmup) / max(1, steps - warmup))
@@ -302,7 +308,11 @@ def batch_loss(
 
 @torch.no_grad()
 def losses(model: EncoderPixl, encode: Callable[[list[str]], torch.Tensor], tokens: torch.Tensor, texts: list[str]) -> torch.Tensor:
-    """(n,) mean loss per pixel of scene i under texts[i], in batches of EVAL_BATCH, on the CPU."""
+    """(n,) mean loss per pixel of scene i under texts[i], in batches of EVAL_BATCH, on the CPU.
+
+    Runs in float32, without the bf16 autocast training uses on CUDA, so these losses and the
+    logged batch loss are not strictly comparable (docs/training.md#measures).
+    """
     device = next(model.parameters()).device
     result = []
     for start in range(0, len(texts), EVAL_BATCH):
@@ -347,16 +357,17 @@ def describe(point: dict[str, float]) -> str:
 
 @torch.no_grad()
 def samples(model: EncoderPixl, encode: Callable[[list[str]], torch.Tensor], texts: list[str]) -> np.ndarray:
-    """(len(texts), 32, 32) samples at TEMPERATURE and GUIDANCE, from a fixed seed.
+    """(len(texts), side, side) samples at the model module's TEMPERATURE, TOP_K and GUIDANCE, from EVAL_SEED.
 
     The random states are forked, so sampling never changes what training draws.
     """
     model.eval()
     with torch.random.fork_rng():
-        torch.manual_seed(SEED)
-        images = model.generate(encode(texts), temperature=TEMPERATURE, top_k=32, guidance=GUIDANCE)
+        torch.manual_seed(EVAL_SEED)
+        images = model.generate(encode(texts), temperature=TEMPERATURE, top_k=TOP_K, guidance=GUIDANCE)
     model.train()
-    return images.view(-1, 32, 32).cpu().numpy()
+    side = model.config.side
+    return images.view(-1, side, side).cpu().numpy()
 
 
 def random_states(rng: random.Random, device: str) -> dict[str, Any]:
@@ -395,14 +406,14 @@ def resume(
         optimizer: Gets the saved optimizer state.
         rng: Gets the saved Python random state.
         device: The training device.
-        expected: Checkpoint key ("settings", "fingerprints") -> its values now;
-            the saved values must match.
+        expected: Checkpoint key ("settings", "fingerprints", "config") -> its
+            values now; the saved values must match.
 
     Returns:
         The steps done and the log so far; 0 and [] without a checkpoint.
 
     Raises:
-        SystemExit: If the checkpoint was made with other settings or inputs.
+        SystemExit: If the checkpoint was made with other settings, inputs or model shape.
     """
     if not checkpoint.exists():
         return 0, []
@@ -460,14 +471,18 @@ def train(args: Args) -> Path:
         (40, 10, 20, 50, 50) if args.quick
         else (args.epochs * len(captions) // args.batch, args.warmup, args.eval_every, EVAL_SCENES, 1)
     )
-    shuffle = torch.Generator().manual_seed(SEED)
+    shuffle = torch.Generator().manual_seed(args.seed)
     order = torch.cat([torch.randperm(len(captions), generator=shuffle) for _ in range(args.epochs)])
     tokenizer = Tokenizer.load()
-    rng = random.Random(SEED)  # caption dropout and place swaps
-    model, optimizer = build(device, args.peak_lr)
+    rng = random.Random(args.seed)  # caption dropout and place swaps
+    model, optimizer = build(device, args)
     print(f"device {device} | {len(captions):,} train scenes | {steps:,} steps of {args.batch} | "
           f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters | {folder} | {fingerprints}")
-    step, log = resume(checkpoint, model, optimizer, rng, device, {"settings": settings, "fingerprints": fingerprints})
+    # The model's config too, except recompute, which follows the device: a run trained without
+    # padding masks must not resume with them.
+    shape = {key: value for key, value in asdict(model.config).items() if key != "recompute"}
+    step, log = resume(checkpoint, model, optimizer, rng, device,
+                       {"settings": settings, "fingerprints": fingerprints, "config": shape})
 
     def encode(texts: list[str]) -> torch.Tensor:
         """(len(texts), CAPTION) caption ids on the device."""
@@ -491,11 +506,11 @@ def train(args: Args) -> Path:
         rows = order[step * args.batch : (step + 1) * args.batch]
         pixels = tokens[rows].flatten(1).long().to(device)
         # Caption dropout empties some captions, so samples can use guidance.
-        texts = ["" if rng.random() < CAPTION_DROP else captions[i] for i in rows.tolist()]
+        texts = ["" if rng.random() < args.caption_drop else captions[i] for i in rows.tolist()]
         loss, pixel_loss = batch_loss(model, encode, texts, pixels, args.margin, rng)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         window.append(pixel_loss.item())
         step += 1
@@ -530,6 +545,19 @@ def parse_args() -> Args:
     _ = parser.add_argument("--warmup", type=int, default=Args.warmup, help="warm-up steps")
     _ = parser.add_argument("--eval-every", type=int, default=Args.eval_every)
     _ = parser.add_argument("--checkpoints", type=Path, default=Args.checkpoints)
+    _ = parser.add_argument(
+        "--caption-drop", type=float, default=Args.caption_drop,
+        help="share of captions left empty, so samples can use guidance",
+    )
+    _ = parser.add_argument("--weight-decay", type=float, default=Args.weight_decay, help="on matrices and embeddings")
+    _ = parser.add_argument("--beta1", type=float, default=Args.beta1, help="AdamW's first-moment decay")
+    _ = parser.add_argument("--beta2", type=float, default=Args.beta2, help="AdamW's second-moment decay")
+    _ = parser.add_argument("--grad-clip", type=float, default=Args.grad_clip, help="largest gradient norm")
+    _ = parser.add_argument(
+        "--seed", type=int, default=Args.seed,
+        help="seeds the initial weights, the order of the scenes, caption dropout and place swaps; "
+        "the evaluated scenes and preview samples stay the same for every seed",
+    )
     _ = parser.add_argument(
         "--margin", type=float, default=Args.margin,
         help="nats per scene the true caption must beat a place-swapped one by; 0 turns it off",

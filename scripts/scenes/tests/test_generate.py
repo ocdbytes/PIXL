@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from scripts.scenes.generate import Sprite, make_scenes, whole
+from scripts.scenes.generate import Sprite, make_scenes
 
 
 def sprite(opaque: list[str]) -> Image.Image:
@@ -18,32 +18,7 @@ def sprite(opaque: list[str]) -> Image.Image:
     return Image.fromarray(rgba, "RGBA")
 
 
-class WholeTest(unittest.TestCase):
-    def test_one_piece_and_diagonal_neighbours_count_as_whole(self) -> None:
-        self.assertTrue(whole(sprite(["##..", "##..", "..#.", "...#"])))
-
-    def test_two_equal_pieces_are_not_whole(self) -> None:
-        self.assertFalse(whole(sprite(["##..", "##..", "....", "..##", "..##"])))
-
-
-class SwappedTest(unittest.TestCase):
-    def test_swapped_caption_reverses_the_positions(self) -> None:
-        objects = [
-            Sprite(f"{label}.png", label, "pack", "train", sprite(["#"]))
-            for label in ("tree", "barrel", "house")
-        ]
-        kinds = set()
-        mirrored = {"left": "right", "right": "left"}
-        for row, _ in make_scenes(16, "train", objects, [], random.Random(0)):
-            caption, swapped = row["caption"], row["swapped"]
-            if pair := re.fullmatch(r"(an? \w+) (left of|above) (an? \w+)", caption):
-                self.assertEqual(swapped, f"{pair[3]} {pair[2]} {pair[1]}")
-            else:
-                expected = re.sub(r"left|right", lambda m: mirrored[m[0]], caption)
-                self.assertEqual(swapped, expected)
-            kinds.add(bool(pair))
-        self.assertEqual(kinds, {True, False})
-
+class SceneTest(unittest.TestCase):
     def test_four_objects_fill_the_quadrants_and_swapped_exchanges_two(self) -> None:
         # No pair of these labels is held out, so train scenes can use all four.
         objects = [

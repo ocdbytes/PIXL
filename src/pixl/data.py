@@ -1,4 +1,4 @@
-"""Loads the scenes of pixl-data as captions and 32x32 palette-token tensors.
+"""Loads the scenes of pixl-data as captions and 32x32 palette-token tensors, and writes captions.
 
 The first load downloads the scenes and encodes them into tokens; the datasets
 library caches the result for later loads.
@@ -21,6 +21,24 @@ SIZE = 32
 # Splits this large encode in parallel on the first load; smaller ones encode faster in one process than
 # worker processes start.
 PARALLEL_ROWS = 100_000
+# The quadrants of a four-object scene, in the order caption() lists them.
+PLACES = ("top left", "top right", "bottom left", "bottom right")
+
+
+def caption(objects: list[str], ground: str = "") -> str:
+    """A scene caption in the training template.
+
+    Args:
+        objects: An object label with its article for each quadrant, in PLACES order.
+        ground: The ground, such as "grass", or "" for a scene drawn without one.
+
+    Returns:
+        For example "a tree at the top left, a hut at the top right, a barrel at the
+        bottom left and a beehive at the bottom right on grass".
+    """
+    parts = [f"{thing} at the {place}" for thing, place in zip(objects, PLACES, strict=True)]
+    text = f"{', '.join(parts[:-1])} and {parts[-1]}"
+    return f"{text} on {ground}" if ground else text
 
 
 def load(split: str, keep: tuple[str, ...] = (), num_proc: int | None = None) -> Dataset:

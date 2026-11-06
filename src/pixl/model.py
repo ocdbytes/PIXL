@@ -29,6 +29,11 @@ from torch.utils.checkpoint import checkpoint
 
 from .tokenizer import BOS, EOS, PAD, Tokenizer
 
+# The sampling settings the training previews and the app start from: temperature below 1 picks
+# likely colours more often, top-k samples from the 32 likeliest, and guidance 3 follows the caption
+# closely.
+TEMPERATURE, TOP_K, GUIDANCE = 0.7, 32, 3.0
+
 
 @dataclass(frozen=True)
 class Config:
@@ -52,6 +57,9 @@ class Config:
             caption's tokens (CrossAttention); EncoderPixl provides them.
         encoder_layers: Blocks of EncoderPixl's caption encoder; other models
             ignore it.
+        mask_padding: Hide the caption slot's <pad> tokens from EncoderPixl's
+            encoder self-attention and decoder cross-attention. Off for models
+            trained before it existed, which attended to them.
     """
 
     text_vocab: int = 1024
@@ -66,6 +74,7 @@ class Config:
     recompute: bool = False
     cross_attention: bool = False
     encoder_layers: int = 4
+    mask_padding: bool = False
 
     @property
     def pixels(self) -> int:
@@ -89,7 +98,11 @@ class CrossAttention(nn.Module):
         self.project = nn.Linear(config.width, config.width)
 
     def forward(
-        self, x: Tensor, memory: Tensor, cache: dict[str, Tensor] | None = None
+        self,
+        x: Tensor,
+        memory: Tensor,
+        cache: dict[str, Tensor] | None = None,
+        mask: Tensor | None = None,
     ) -> Tensor:
         """The attention result for each token of x.
 
@@ -98,6 +111,8 @@ class CrossAttention(nn.Module):
             memory: (batch, tokens, width) caption token vectors.
             cache: For generation: keeps the memory's keys and values, which
                 every step reuses.
+            mask: (batch, 1, 1, tokens), True for the caption tokens to attend
+                to; None attends to all of them.
 
         Returns:
             (batch, length, width) update for the residual stream.
@@ -114,7 +129,7 @@ class CrossAttention(nn.Module):
                 cache["memory_k"], cache["memory_v"] = k, v
         q = self.query(self.norm(x))
         q = q.view(batch, length, self.heads, width // self.heads).transpose(1, 2)
-        attended = F.scaled_dot_product_attention(q, k, v)
+        attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.project(attended.transpose(1, 2).reshape(batch, length, width))
 
 
@@ -158,6 +173,7 @@ class Block(nn.Module):
         x: Tensor,
         cache: dict[str, Tensor] | None = None,
         memory: Tensor | None = None,
+        caption_mask: Tensor | None = None,
     ) -> Tensor:
         """Runs the block on new tokens.
 
@@ -167,6 +183,9 @@ class Block(nn.Module):
                 in place with the new ones. None in training.
             memory: (batch, tokens, width) caption tokens for the cross-attention;
                 None skips it.
+            caption_mask: (batch, 1, 1, caption), True for the caption slots to
+                attend to, or None for all: applied to the self-attention of a
+                caption encoder block (causal=False) and to the cross-attention.
 
         Returns:
             (batch, length, width) updated vectors.
@@ -176,9 +195,9 @@ class Block(nn.Module):
             # replayed its masks incorrectly and produced different gradients.
             # * checkpointing uses less memory while training but training takes longer than
             # the alternate without checkpojnt
-            x, update = checkpoint(self.parts, x, None, memory, use_reentrant=False)
+            x, update = checkpoint(self.parts, x, None, memory, caption_mask, use_reentrant=False)
         else:
-            x, update = self.parts(x, cache, memory)
+            x, update = self.parts(x, cache, memory, caption_mask)
         # Dropout is applied here: mlp[-1] is the Dropout, applied to the MLP update before
         # it is added to the residual stream.
         return x + self.mlp[-1](update)
@@ -188,8 +207,9 @@ class Block(nn.Module):
         x: Tensor,
         cache: dict[str, Tensor] | None = None,
         memory: Tensor | None = None,
+        caption_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """x after self/cross-attention updates, and the MLP's output before dropout."""
+        """x after self/cross-attention updates, and the MLP's output before dropout; see forward."""
         batch, length, width = x.shape
         q, k, v = self.qkv(self.attention_norm(x)).split(width, dim=2)
         # Divide attention among the heads
@@ -202,14 +222,19 @@ class Block(nn.Module):
                 k = torch.cat([cache["k"], k], dim=2)
                 v = torch.cat([cache["v"], v], dim=2)
             cache["k"], cache["v"] = k, v
-        # A single new token may see every cached one; a full sequence is causal.
+        # A single new token may see every cached one; a full sequence is causal. A caption
+        # encoder block's keys are caption slots, so the caption mask applies there.
         attended = F.scaled_dot_product_attention(
-            q, k, v, is_causal=self.causal and q.shape[2] == k.shape[2]
+            q,
+            k,
+            v,
+            attn_mask=None if self.causal else caption_mask,
+            is_causal=self.causal and q.shape[2] == k.shape[2],
         )
         # Rejoin the heads, project the attention output, and add the residual.
         x = x + self.project(attended.transpose(1, 2).reshape(batch, length, width))
         if self.cross is not None and memory is not None:
-            x = x + self.cross(x, memory, cache)
+            x = x + self.cross(x, memory, cache, caption_mask)
         # mlp[:-1] is the MLP without its dropout, which forward applies.
         return x, self.mlp[:-1](self.mlp_norm(x))
 
@@ -279,11 +304,16 @@ class Pixl(nn.Module):
         """Caption token vectors for the blocks' cross-attention; Pixl has none."""
         return None
 
+    def caption_mask(self, captions: Tensor) -> Tensor | None:
+        """The caption slots attention may read, for Block's caption_mask; Pixl reads them all."""
+        return None
+
     def run(
         self,
         x: Tensor,
         caches: list[dict[str, Tensor]] | None = None,
         memory: Tensor | None = None,
+        caption_mask: Tensor | None = None,
     ) -> Tensor:
         """Runs the blocks and returns pixel logits for every position.
 
@@ -291,9 +321,10 @@ class Pixl(nn.Module):
             x: (batch, length, width) token vectors.
             caches: For generation: one cache per block.
             memory: caption_memory's output, or None.
+            caption_mask: caption_mask's output, or None.
         """
         for i, block in enumerate(self.blocks):
-            x = block(x, caches[i] if caches is not None else None, memory)
+            x = block(x, caches[i] if caches is not None else None, memory, caption_mask)
         return self.head(self.norm(x))
 
     def forward(self, captions: Tensor, pixels: Tensor) -> Tensor:
@@ -310,7 +341,8 @@ class Pixl(nn.Module):
         text = self.embed_text(captions)
         x = torch.cat([text, self.embed_pixels(pixels[:, :-1])], 1)
         # The last text position (<eos>, or a start token) predicts pixel 0.
-        return self.run(x, memory=self.caption_memory(captions))[:, text.shape[1] - 1 :]
+        logits = self.run(x, memory=self.caption_memory(captions), caption_mask=self.caption_mask(captions))
+        return logits[:, text.shape[1] - 1 :]
 
     def loss(self, captions: Tensor, pixels: Tensor) -> Tensor:
         """(batch,) mean cross-entropy over each scene's pixel predictions."""
@@ -349,8 +381,8 @@ class Pixl(nn.Module):
         # Each block keeps the keys and values of earlier tokens, so every step
         # runs the network on the newest pixel only.
         caches: list[dict[str, Tensor]] = [{} for _ in self.blocks]
-        memory = self.caption_memory(captions)
-        logits = self.run(self.embed_text(captions), caches, memory)[:, -1]
+        memory, mask = self.caption_memory(captions), self.caption_mask(captions)
+        logits = self.run(self.embed_text(captions), caches, memory, mask)[:, -1]
         pixels: list[Tensor] = []
         for i in range(self.config.pixels):
             logits = logits / temperature
@@ -366,7 +398,7 @@ class Pixl(nn.Module):
                 token = token.repeat(2, 1)
             if i + 1 < self.config.pixels:
                 x = self.embed_pixels(token, start=i)
-                logits = self.run(x, caches, memory)[:, -1]
+                logits = self.run(x, caches, memory, mask)[:, -1]
         return torch.cat(pixels, dim=1)
 
 
@@ -374,7 +406,7 @@ class EncoderPixl(Pixl):
     """Encoder-decoder Pixl, trained from scratch.
 
     The encoder reads the caption slot (Pixl's learned token and slot
-    embeddings, padding included) with Config.encoder_layers bidirectional
+    embeddings; padding included unless Config.mask_padding hides it) with Config.encoder_layers bidirectional
     blocks, so every caption token sees the whole caption in order. The decoder
     is Pixl's pixel stack with Config.cross_attention: its sequence is a learned
     start token and the pixels, with no caption in front, and every block
@@ -399,9 +431,17 @@ class EncoderPixl(Pixl):
     def caption_memory(self, captions: Tensor) -> Tensor:
         """(batch, caption, width) encoder outputs for the decoder's cross-attention."""
         x = super().embed_text(captions)
+        mask = self.caption_mask(captions)
         for block in self.encoder:
-            x = block(x)
+            x = block(x, caption_mask=mask)
         return self.encoder_norm(x)
+
+    def caption_mask(self, captions: Tensor) -> Tensor | None:
+        """(batch, 1, 1, caption), True for the slots other than <pad>, with Config.mask_padding; else None.
+
+        <bos> and <eos> are never padding, so every row keeps a slot to attend to.
+        """
+        return (captions != PAD)[:, None, None, :] if self.config.mask_padding else None
 
     def embed_text(self, captions: Tensor) -> Tensor:
         """(batch, 1, width): the start token, which predicts pixel 0.

@@ -7,7 +7,7 @@ uv run python -m scripts.scenes.generate --sheets
 uv run python -m scripts.hub.sync push --only scenes   # publishes to the public dataset
 ```
 
-It writes `scene-data/tokens.npy` and `scene-data/manifest.csv`, and with `--sheets` review images in `scene-data/review/`. Splits, flags and how a scene is made are in [docs/data.md](../../docs/data.md#scenes).
+It writes `scene-data/tokens.npy` and `scene-data/manifest.csv`, and with `--sheets` review images in `scene-data/review/`. The dataset split, generator flags and limitations are in [docs/data.md](../../docs/data.md#scene-generation).
 
 `vocabulary.py` reads that manifest and writes `src/pixl/vocabulary.json`: each pack's object labels and grounds, exactly as the train captions write them. The app (`python -m pixl.app`) builds its menus from it. Rerun it after regenerating the scenes:
 

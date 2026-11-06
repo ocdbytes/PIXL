@@ -25,14 +25,14 @@ import torch
 from gradio.themes import Base, GoogleFont
 from PIL import Image
 
-from .model import EncoderPixl, encode_captions
+from .data import PLACES, caption
+from .model import GUIDANCE, TEMPERATURE, TOP_K, EncoderPixl, encode_captions
 from .preprocess import decode, load_palette
 from .tokenizer import Tokenizer
 from .train import MODEL_REPO, load_pretrained, pick_device
 
 # Per sprite pack: its display name, object labels with articles, and grounds ("" for none).
 VOCABULARY = resources.files("pixl").joinpath("vocabulary.json")
-PLACES = ("top left", "top right", "bottom left", "bottom right")
 # The ground menu's entry for packs drawn without a ground.
 NO_GROUND = "no ground"
 # Ready-made scenes: name -> (pack, ground, objects in PLACES order).
@@ -54,7 +54,6 @@ EXAMPLES = {
               ["a player ship", "an effects explosion", "an items power item", "an enemies alan"]),
 }
 START = "Dungeon party"
-TOP_K = 32
 SCALE = 8  # each drawn pixel becomes SCALE x SCALE on screen
 HEADER = f"""
 <header class="px-header">
@@ -132,16 +131,14 @@ def load_vocabulary() -> dict[str, dict[str, Any]]:
     return json.loads(VOCABULARY.read_text(encoding="utf-8"))
 
 
-def caption(objects: list[str], ground: str) -> str:
-    """A caption in the training template: each object at its quadrant, in PLACES order, then the ground.
+def caption_of(objects: list[str], ground: str) -> str:
+    """The caption of a scene in the menus, whose ground menu shows NO_GROUND for none.
 
     Args:
         objects: An object label with its article for each quadrant, in PLACES order.
-        ground: The ground, or "" or NO_GROUND for none.
+        ground: The ground menu's value: a ground, NO_GROUND, or "".
     """
-    parts = [f"{thing} at the {place}" for thing, place in zip(objects, PLACES, strict=True)]
-    text = f"{', '.join(parts[:-1])} and {parts[-1]}"
-    return f"{text} on {ground}" if ground and ground != NO_GROUND else text
+    return caption(objects, "" if ground == NO_GROUND else ground)
 
 
 def rotate(objects: list[str]) -> list[str]:
@@ -158,7 +155,7 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
         vocabulary: From load_vocabulary().
     """
     tokenizer, palette = Tokenizer.load(), load_palette()
-    device = next(model.parameters()).device
+    device, side = next(model.parameters()).device, model.config.side
 
     def grounds(pack: str) -> list[str]:
         return [ground or NO_GROUND for ground in vocabulary[pack]["grounds"]]
@@ -183,7 +180,7 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
             gr.Dropdown(value=pack, info=about(pack)),
             gr.Dropdown(choices=grounds(pack), value=ground or NO_GROUND, info=ground_note(pack)),
             *(gr.Dropdown(choices=choices, value=thing) for thing in objects),
-            caption(objects, ground),
+            caption_of(objects, ground),
         ]
 
     def random_scene(pack: str) -> list[Any]:
@@ -195,12 +192,12 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
 
     def write(ground: str, top_left: str, top_right: str, bottom_left: str, bottom_right: str) -> str:
         objects = [top_left, top_right, bottom_left, bottom_right]
-        return caption(objects, ground) if all(objects) else ""
+        return caption_of(objects, ground) if all(objects) else ""
 
     def turn(ground: str, top_left: str, top_right: str, bottom_left: str, bottom_right: str) -> list[str]:
         """The objects one quadrant clockwise, and their caption."""
         objects = rotate([top_left, top_right, bottom_left, bottom_right])
-        return [*objects, caption(objects, ground)]
+        return [*objects, caption_of(objects, ground)]
 
     def draw(
         ground: str, top_left: str, top_right: str, bottom_left: str, bottom_right: str,
@@ -219,13 +216,13 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
             raise gr.Error("Pick four different objects: training scenes never repeat a label.")
         used = random.randrange(2**31) if new_seed else int(seed)
         count = int(samples)
-        ids = encode_captions([caption(objects, ground)] * count, tokenizer, length=model.config.caption)
+        ids = encode_captions([caption_of(objects, ground)] * count, tokenizer, length=model.config.caption)
         started = time.time()
         torch.manual_seed(used)
         tokens = model.generate(ids.to(device), temperature=temperature, top_k=TOP_K, guidance=guidance)
         images = [
-            decode(grid, palette).resize((32 * SCALE, 32 * SCALE), Image.Resampling.NEAREST)
-            for grid in tokens.view(-1, 32, 32).cpu().numpy().astype(np.uint8)
+            decode(grid, palette).resize((side * SCALE, side * SCALE), Image.Resampling.NEAREST)
+            for grid in tokens.view(-1, side, side).cpu().numpy().astype(np.uint8)
         ]
         status = f"{count} scene{'s' if count > 1 else ''} · {time.time() - started:.1f} s · seed {used}"
         return images, used, status
@@ -258,8 +255,8 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
                     shuffle = gr.Button("Randomize", size="sm")
                     turning = gr.Button("Rotate clockwise", size="sm")
                 with gr.Accordion("Advanced", open=False, elem_classes="px-accordion"):
-                    guidance = gr.Slider(1, 6, value=3, step=0.5, label="Guidance")
-                    temperature = gr.Slider(0.3, 1.2, value=0.7, step=0.05, label="Temperature")
+                    guidance = gr.Slider(1, 6, value=GUIDANCE, step=0.5, label="Guidance")
+                    temperature = gr.Slider(0.3, 1.2, value=TEMPERATURE, step=0.05, label="Temperature")
                     samples = gr.Slider(1, 8, value=4, step=1, label="Scenes")
                     with gr.Row():
                         seed = gr.Number(0, precision=0, label="Seed")
@@ -270,7 +267,7 @@ def build(model: EncoderPixl, vocabulary: dict[str, dict[str, Any]]) -> gr.Block
                 gallery = gr.Gallery(show_label=False, columns=2, height=600, object_fit="contain",
                                      elem_classes="px-canvas")
                 status = gr.Markdown("Choose a scene, then generate.", elem_classes="px-meta")
-                text = gr.Markdown(caption(objects, ground_name), elem_classes="px-caption")
+                text = gr.Markdown(caption_of(objects, ground_name), elem_classes="px-caption")
 
         shown = [pack, ground, *quadrants, text]
         hidden = "undocumented"  # callable by the Gradio client, left out of the API page

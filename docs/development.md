@@ -1,39 +1,37 @@
 # Development
 
-## Layout
+Pixl requires Python 3.11 or newer and uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
-| Path | Contents |
-|---|---|
-| [`src/pixl/`](../src/pixl) | The `pixl` package: palette (`preprocess.py`), caption tokenizer (`tokenizer.py`), data loader (`data.py`), model (`model.py`) and training (`train.py`) |
-| [`scripts/scenes/`](../scripts/scenes) | Scene generator ([data.md](data.md#scenes)), and the app's `vocabulary.json` builder |
-| [`scripts/hub/`](../scripts/hub) | Hugging Face sync and dataset card ([data.md](data.md#hugging-face-sync)) |
-| [`notebooks/`](../notebooks) | Training and generation notebooks ([training.md](training.md#notebooks)) |
-| [`tests/`](../tests) and `scripts/*/tests/` | Unit tests and the notebook import check |
-| [`Dockerfile`](../Dockerfile) | Training image ([server.md](server.md)) |
+```bash
+uv sync
+```
 
-Data lives in `downloaded-data/` (sprites) and `scene-data/` (scenes), and model states in `checkpoints/`. These directories are excluded from Git.
+This installs the package in `src/pixl/` together with the development, notebook and app dependencies locked in [`uv.lock`](../uv.lock). Dependency groups and package metadata are defined in [`pyproject.toml`](../pyproject.toml).
 
-## The package
+## Repository structure
 
-`uv sync` installs `src/pixl/` as the `pixl` package, built by `uv_build`, so `import pixl` works from any directory. [`palette.json`](../src/pixl/palette.json) and [`tokenizer.json`](../src/pixl/tokenizer.json) ship inside it and load through `importlib.resources`; the palette is fixed, and rebuilding the tokenizer writes over the package's own file. The scripts in `scripts/` run from the project root (`uv run python -m scripts.scenes.generate`) and import `pixl` like any other package.
+- [`src/pixl/`](../src/pixl) contains the Python package.
+- [`scripts/scenes/`](../scripts/scenes) contains scene generation and vocabulary tooling.
+- [`scripts/hub/`](../scripts/hub) contains Hugging Face dataset tooling.
+- [`notebooks/`](../notebooks) contains training and generation notebooks.
+- [`tests/`](../tests) and `scripts/*/tests/` contain the test suite.
+- [`docs/`](.) contains project documentation.
 
-## Dependencies
+Generated data is stored in `downloaded-data/` and `scene-data/`. Training writes checkpoints to `checkpoints/`. These directories are not tracked by Git.
 
-| Group | Packages | Installed by |
-|---|---|---|
-| main | `datasets`, `huggingface-hub`, `numpy`, `pillow`, `torch` | Everything, including the Docker image |
-| `dev` | `ruff`, `basedpyright` | `uv sync` (a default group) |
-| `notebook` | `ipykernel`, `ipywidgets`, `matplotlib`, `pandas` | `uv sync` (a default group) |
-| `app` | `gradio` | `uv sync` (a default group) |
+Run scripts as modules from the repository root:
 
-[`uv.lock`](../uv.lock) pins every version, [`.python-version`](../.python-version) picks Python 3.11, and the package requires 3.11 or newer. The Docker image installs the main dependencies only (`--no-default-groups`).
+```bash
+uv run python -m scripts.scenes.generate --help
+uv run python -m pixl.train --quick
+```
 
 ## Checks
 
 ```bash
 uv run ruff check
-uv run basedpyright                                       # type checking
-uv run python -m unittest discover -s . -p "test_*.py"   # unit tests and notebook import checks
+uv run basedpyright
+uv run python -m unittest discover -s . -p "test_*.py"
 ```
 
-[`tests/test_notebooks.py`](../tests/test_notebooks.py) imports every module and name the notebooks import, without running them. [GitHub Actions](../.github/workflows/checks.yml) runs linting, type checking, unit tests and notebook import checks on every push and pull request, with the locked dependencies (`uv sync --locked`).
+The same checks run in [GitHub Actions](../.github/workflows/checks.yml).
