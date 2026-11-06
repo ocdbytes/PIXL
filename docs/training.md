@@ -53,22 +53,22 @@ CUDA training runs under bf16 autocast. CPU and MPS use float32 and enable gradi
 
 ## Objective
 
-Let \(P\) be the number of pixels and \(B\) the batch size. For scene \(i\), `model.loss()` returns the mean pixel cross-entropy \(l_i\) in nats per pixel.
+Let $P$ be the number of pixels and $B$ the batch size. For scene $i$, `model.loss()` returns the mean pixel cross-entropy $l_i$ in nats per pixel.
 
-For every non-empty caption, the same image is also scored under a caption with two object positions exchanged. If its mean loss is \(\tilde{l}_i\), the scene-level separation is
+For every non-empty caption, the same image is also scored under a caption with two object positions exchanged. If its mean loss is $\tilde{l}_i$, the scene-level separation is
 
-\[
+$$
 g_i = P(\tilde{l}_i - l_i).
-\]
+$$
 
 The optimized batch objective is
 
-\[
+$$
 L = \frac{1}{B}\sum_i l_i
-  + \frac{1}{BP}\sum_{i \in \text{non-empty}} \max(0, m - g_i),
-\]
+  + \frac{1}{BP}\sum_{i \in \text{non-empty}} \max(0, m - g_i).
+$$
 
-where \(m\) is `--margin`. With the default margin of 2, the swapped caption must cost at least two nats more per scene than the correct caption. A row contributes no margin penalty once that separation is reached. `--margin 0` disables swapped-caption scoring.
+where $m$ is `--margin`. With the default margin of 2, the swapped caption must cost at least two nats more per scene than the correct caption. A row contributes no margin penalty once that separation is reached. `--margin 0` disables swapped-caption scoring.
 
 The additional forward rows nearly double compute and activation memory. The logged `batch loss` is only the first term: mean pixel loss under the training captions.
 
