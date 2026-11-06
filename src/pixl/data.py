@@ -36,12 +36,16 @@ def caption(objects: list[str], ground: str = "") -> str:
         For example "a tree at the top left, a hut at the top right, a barrel at the
         bottom left and a beehive at the bottom right on grass".
     """
-    parts = [f"{thing} at the {place}" for thing, place in zip(objects, PLACES, strict=True)]
+    parts = [
+        f"{thing} at the {place}" for thing, place in zip(objects, PLACES, strict=True)
+    ]
     text = f"{', '.join(parts[:-1])} and {parts[-1]}"
     return f"{text} on {ground}" if ground else text
 
 
-def load(split: str, keep: tuple[str, ...] = (), num_proc: int | None = None) -> Dataset:
+def load(
+    split: str, keep: tuple[str, ...] = (), num_proc: int | None = None
+) -> Dataset:
     """Loads one split of the scenes as captions and token grids.
 
     Args:
@@ -59,7 +63,9 @@ def load(split: str, keep: tuple[str, ...] = (), num_proc: int | None = None) ->
     def to_tokens(batch: dict[str, list]) -> dict[str, list]:
         return {"tokens": [encode(image, palette) for image in batch["image"]]}
 
-    data = load_dataset(REPO, "scenes", split=split).select_columns(["caption", "image", *keep])
+    data = load_dataset(REPO, "scenes", split=split).select_columns(
+        ["caption", "image", *keep]
+    )
     if num_proc is None:
         # On Linux the affinity mask honours a container's --cpuset-cpus; macOS has no such call.
         if hasattr(os, "sched_getaffinity"):

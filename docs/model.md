@@ -73,11 +73,12 @@ A learned start token predicts the first pixel; each subsequent position receive
 
 ## Training objective
 
-For an image with pixel tokens \(p_0, \ldots, p_{1023}\), the decoder models
+For an image with pixel tokens $p_0, \ldots, p_{1023}$, the decoder models
 
-```text
-P(image | caption) = ∏ P(p_i | caption, p_0, ..., p_{i-1})
-```
+$$
+P(\text{image} \mid \text{caption})
+= \prod_{i=0}^{1023} P(p_i \mid \text{caption}, p_{<i}).
+$$
 
 `model.loss()` applies cross-entropy to all 1,024 predictions and returns the mean loss per pixel for each scene. [`pixl.train`](training.md) adds caption dropout and the position-margin objective around this model loss.
 
