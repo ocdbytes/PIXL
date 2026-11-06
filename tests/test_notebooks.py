@@ -4,7 +4,12 @@ import json
 import unittest
 from pathlib import Path
 
-NOTEBOOKS = sorted(Path(__file__).resolve().parents[1].joinpath("notebooks").glob("*.ipynb"))
+# Subfolders too, such as notebooks/analysis/; Jupyter's autosave copies are not notebooks of the repo.
+NOTEBOOKS = sorted(
+    path
+    for path in Path(__file__).resolve().parents[1].joinpath("notebooks").rglob("*.ipynb")
+    if ".ipynb_checkpoints" not in path.parts
+)
 
 
 def imports(notebook: Path) -> list[tuple[str, list[str]]]:

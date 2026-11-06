@@ -85,6 +85,18 @@ Intermediate evaluations score every fourth scene in this pool. The final evalua
 | --- | --- |
 | Loss | Mean pixel cross-entropy under the correct caption |
 | Position | Fraction of scenes whose correct caption has lower loss than the dataset's position-swapped caption |
+| Gap | Mean of how many nats per scene the swapped caption's loss exceeds the correct one's: the continuous quantity position thresholds at 0 |
+
+Each evaluation also logs measures for finding what changes when position starts to rise:
+
+| Log key | Definition |
+| --- | --- |
+| `learning rate` | Learning rate of the last step |
+| `hinge active` | Share of kept captions whose gap was below `--margin`, averaged over the steps since the last evaluation; margin runs only |
+| `pixel grad norm`, `margin grad norm` | Gradient norm of each loss term before clipping, on a fixed batch of 16 train evaluation scenes; the margin term only with a margin |
+| `place attention <i>` | Share of decoder block *i*'s cross-attention, from 0 at the input, over every head and pixel position of that batch, that lands on the place words (`top`, `bottom`, `left`, `right`) |
+
+On that batch, attention spread evenly puts about 0.18 on the place words (8 of roughly 44 caption tokens, with padding masked), so a higher share means the decoder looks at them more than chance. The measures run in eval mode and draw from their own generator, so a run trains exactly as it would without them. For the step-by-step view of the position jump, train with `--eval-every 500`.
 
 Position has a chance level of 0.5. `new pair` position tests whether the model uses location language for unseen combinations of known objects. `new sprites` also changes the underlying sprite images and is therefore a stronger distribution shift.
 

@@ -4,9 +4,10 @@ The scenes come from the Hugging Face dataset; the first run downloads and
 encodes them, and later runs read the Hugging Face cache. Training makes --epochs
 passes over the train scenes. Next to the pixel loss, a hinge term asks each scene
 to have a loss at least --margin nats lower under its caption than under the same
-caption with two random objects' places exchanged. Every --eval-every steps it prints the loss and
-position accuracy of each kind of evaluation scene, saves real and generated
-preview scenes as <checkpoints>/<run>/samples-<step>.png, and saves checkpoint.pt
+caption with two random objects' places exchanged. Every --eval-every steps it prints the loss,
+position accuracy and gap of each kind of evaluation scene, and on a fixed batch the gradient
+norm of each loss term and the share of cross-attention on place words. It saves real and
+generated preview scenes as <checkpoints>/<run>/samples-<step>.png, and saves checkpoint.pt
 in the same folder. At the end a full run scores every evaluation scene.
 --quick uses <run>-quick, trains for 40 steps on 2,000 train scenes, evaluates
 every 20 steps, and scores every 50th evaluation scene, including at the end.
@@ -49,7 +50,15 @@ from safetensors.torch import load_file
 from torch.nn import functional as F
 
 from .data import PLACES, load
-from .model import GUIDANCE, TEMPERATURE, TOP_K, Config, EncoderPixl, encode_captions
+from .model import (
+    GUIDANCE,
+    TEMPERATURE,
+    TOP_K,
+    Config,
+    CrossAttention,
+    EncoderPixl,
+    encode_captions,
+)
 from .preprocess import PALETTE, decode, load_palette
 from .tokenizer import TOKENIZER, Tokenizer
 
@@ -59,6 +68,7 @@ CAPTION = 96
 TRAIN_EVAL = 500  # train scenes among the evaluation scenes, next to every test scene
 EVAL_SCENES = 4  # Full runs: every fourth scene during training, all scenes at the end; quick runs use 50.
 EVAL_BATCH = 64
+PROBE = 16  # train evaluation scenes in the fixed batch probes() measures
 # Picks the evaluated train scenes and seeds the preview samples, whatever --seed is, so every run
 # is measured on the same scenes.
 EVAL_SEED = 0
@@ -106,6 +116,22 @@ def swap_places(caption: str, rng: random.Random) -> str:
     places[i], places[j] = places[j], places[i]
     swapped = iter(places)
     return PLACE_PHRASE.sub(lambda _: next(swapped), caption)
+
+
+def place_tokens(tokenizer: Tokenizer) -> torch.Tensor:
+    """The token ids of the words of PLACES: "top", "bottom", "left" and "right".
+
+    Object labels never contain these words (FRAGMENT in scripts/scenes/generate.py), so in a
+    scene caption they only name places.
+
+    Raises:
+        ValueError: If the tokenizer splits one of the words into several tokens.
+    """
+    words = sorted({word for place in PLACES for word in place.split()})
+    ids = [tokenizer.encode(word) for word in words]
+    if any(len(word_ids) != 1 for word_ids in ids):
+        raise ValueError(f"place words must be one token each: {dict(zip(words, ids, strict=True))}")
+    return torch.tensor([word_ids[0] for word_ids in ids])
 
 
 def pick_device(name: str = "auto") -> str:
@@ -277,7 +303,7 @@ def batch_loss(
     pixels: torch.Tensor,
     margin: float,
     rng: random.Random,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The training loss of one batch: pixel loss plus the position margin.
 
     Args:
@@ -291,7 +317,8 @@ def batch_loss(
         rng: Picks the objects whose places are exchanged.
 
     Returns:
-        The loss to minimise, and the true captions' mean pixel loss alone.
+        The true captions' mean pixel loss and the margin term, whose sum is the loss to minimise;
+        and the share of kept captions whose gap is below the margin (nan when none are kept).
     """
     kept = [i for i, text in enumerate(texts) if text] if margin else []
     both = torch.cat([pixels, pixels[kept]])
@@ -302,8 +329,8 @@ def batch_loss(
     right, wrong = scene_losses[: len(texts)], scene_losses[len(texts) :]
     # The margin is in nats per scene and the losses per pixel; dropped captions add 0.
     gap = (wrong - right[kept]) * pixels.shape[1]
-    pixel_loss = right.mean()
-    return pixel_loss + F.relu(margin - gap).sum() / (pixels.shape[1] * len(texts)), pixel_loss
+    margin_loss = F.relu(margin - gap).sum() / (pixels.shape[1] * len(texts))
+    return right.mean(), margin_loss, (gap < margin).float().mean()
 
 
 @torch.no_grad()
@@ -333,7 +360,8 @@ def scores(
         every: Scores every this many-th scene of the pool.
 
     Returns:
-        "<kind> loss" and "<kind> position" for each kind in KINDS.
+        "<kind> loss", "<kind> position" and "<kind> gap" for each kind in KINDS; the gap is the
+        mean of how many nats per scene the swapped caption's loss exceeds the true one's.
     """
     rows = list(range(0, len(scenes.kinds), every))
     tokens = scenes.tokens[rows]
@@ -347,12 +375,76 @@ def scores(
         mask = torch.from_numpy(kinds == kind)
         result[f"{kind} loss"] = right[mask].mean().item()
         result[f"{kind} position"] = (right[mask] < wrong[mask]).float().mean().item()
+        result[f"{kind} gap"] = ((wrong[mask] - right[mask]) * model.config.pixels).mean().item()
     return result
 
 
+def probes(
+    model: EncoderPixl,
+    encode: Callable[[list[str]], torch.Tensor],
+    texts: list[str],
+    pixels: torch.Tensor,
+    margin: float,
+    places: torch.Tensor,
+) -> dict[str, float]:
+    """Internal measures on a fixed batch, to see what changes when position starts to rise.
+
+    Runs in eval mode, which has no dropout or recompute, and swaps places with its own
+    generator, so training draws and computes exactly what it would without them.
+
+    Args:
+        model: The model; in eval mode while measuring, then back in training mode.
+        encode: Turns captions into caption ids on the model's device.
+        texts: The batch's captions, none empty.
+        pixels: (batch, pixels) their scenes' tokens on the model's device.
+        margin: The run's margin; 0 skips the margin's gradient.
+        places: place_tokens() on the model's device.
+
+    Returns:
+        "pixel grad norm" and, with a margin, "margin grad norm": the gradient norm of each term
+        of the training loss before clipping. "place attention <i>" for each decoder block i,
+        from 0 at the input: the share of its cross-attention, over every head and pixel
+        position, that lands on place words.
+    """
+    model.eval()
+    pixel_loss, margin_loss, _ = batch_loss(model, encode, texts, pixels, margin, random.Random(EVAL_SEED))
+    terms = {"pixel": pixel_loss} | ({"margin": margin_loss} if margin else {})
+    result: dict[str, float] = {}
+    for name, term in terms.items():
+        gradients = torch.autograd.grad(term, list(model.parameters()), retain_graph=True, allow_unused=True)
+        result[f"{name} grad norm"] = torch.nn.utils.get_total_norm([g for g in gradients if g is not None]).item()
+    ids = encode(texts)
+    on_places = torch.isin(ids, places)[:, None, None, :]  # (batch, 1, 1, caption) like the weights
+    shares: list[float] = []
+
+    def measure(module: CrossAttention, args: tuple[Any, ...]) -> None:
+        x, memory, _, mask = args  # as Block.parts calls it
+        shares.append((module.weights(x, memory, mask) * on_places).sum(-1).mean().item())
+
+    hooks = [m.register_forward_pre_hook(measure) for m in model.blocks.modules() if isinstance(m, CrossAttention)]
+    try:
+        with torch.no_grad():
+            model(ids, pixels)
+    finally:
+        for hook in hooks:
+            hook.remove()
+    model.train()
+    return result | {f"place attention {i}": share for i, share in enumerate(shares)}
+
+
 def describe(point: dict[str, float]) -> str:
-    """Each kind's loss and position from scores(), as one log line part."""
-    return " | ".join(f"{kind} loss {point[f'{kind} loss']:.3f} pos {point[f'{kind} position']:.3f}" for kind in KINDS)
+    """One log line part: each kind's loss, position and gap, then the hinge and probe measures it has."""
+    parts = [
+        f"{kind} loss {point[f'{kind} loss']:.3f} pos {point[f'{kind} position']:.3f} gap {point[f'{kind} gap']:.2f}"
+        for kind in KINDS
+    ]
+    if "hinge active" in point:
+        parts.append(f"hinge active {point['hinge active']:.2f}")
+    if "pixel grad norm" in point:
+        norms = " ".join(f"{term} {point[f'{term} grad norm']:.3f}" for term in ("pixel", "margin") if f"{term} grad norm" in point)
+        shares = " ".join(f"{value:.2f}" for key, value in point.items() if key.startswith("place attention"))
+        parts += [f"grad norm {norms}", f"place attention {shares}"]
+    return " | ".join(parts)
 
 
 @torch.no_grad()
@@ -492,13 +584,20 @@ def train(args: Args) -> Path:
     preview_set = {"captions": [scenes.captions[i] for i in preview], "swapped": [scenes.swapped[i] for i in preview],
                    "tokens": scenes.tokens[preview]}
 
+    # The fixed batch probes() measures: the first train evaluation scenes, with their captions.
+    probe = np.flatnonzero(scenes.kinds == "train")[:PROBE]
+    probe_texts = [scenes.captions[i] for i in probe]
+    probe_pixels = scenes.tokens[probe].flatten(1).long().to(device)
+    places = place_tokens(tokenizer).to(device)
+
     def state(**extra: object) -> dict[str, Any]:
         """Everything a resume needs, plus the log and preview both notebooks read."""
         return {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": asdict(model.config),
                 "step": step, "log": log, "preview": preview_set, "settings": settings,
                 "fingerprints": fingerprints, "random": random_states(rng, device), **extra}
 
-    started, window, tick = time.time(), [], time.time()
+    # Per step since the last evaluation: the pixel loss, and with a margin the hinge's active share.
+    started, window, hinges, tick = time.time(), [], [], time.time()
     model.train()
     while step < steps:
         for group in optimizer.param_groups:
@@ -507,17 +606,23 @@ def train(args: Args) -> Path:
         pixels = tokens[rows].flatten(1).long().to(device)
         # Caption dropout empties some captions, so samples can use guidance.
         texts = ["" if rng.random() < args.caption_drop else captions[i] for i in rows.tolist()]
-        loss, pixel_loss = batch_loss(model, encode, texts, pixels, args.margin, rng)
+        pixel_loss, margin_loss, active = batch_loss(model, encode, texts, pixels, args.margin, rng)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        (pixel_loss + margin_loss).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         window.append(pixel_loss.item())
+        if args.margin:
+            hinges.append(active.item())
         step += 1
         if step % eval_every == 0 or step == steps:
             seconds = (time.time() - tick) / len(window)
-            point = {"step": step, "batch loss": sum(window) / len(window), "seconds per step": seconds}
+            point = {"step": step, "batch loss": sum(window) / len(window), "seconds per step": seconds,
+                     "learning rate": optimizer.param_groups[0]["lr"]}
+            if hinges:
+                point["hinge active"] = sum(hinges) / len(hinges)
             point |= scores(model, encode, scenes, eval_scenes)
+            point |= probes(model, encode, probe_texts, probe_pixels, args.margin, places)
             log.append(point)
             print(" | ".join([f"step {step:,}", f"batch loss {point['batch loss']:.3f}", describe(point),
                               f"{seconds:.2f} s/step", f"elapsed {clock(time.time() - started)}",
@@ -527,7 +632,7 @@ def train(args: Args) -> Path:
             save(checkpoint, state())
             if device == "mps":
                 torch.mps.empty_cache()  # drop the cache the measures left behind
-            window, tick = [], time.time()
+            window, hinges, tick = [], [], time.time()
 
     final = scores(model, encode, scenes, final_scenes)
     print("final evaluation scores: " + describe(final))

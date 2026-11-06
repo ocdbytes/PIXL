@@ -132,6 +132,27 @@ class CrossAttention(nn.Module):
         attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.project(attended.transpose(1, 2).reshape(batch, length, width))
 
+    def weights(self, x: Tensor, memory: Tensor, mask: Tensor | None = None) -> Tensor:
+        """The attention weights forward uses, which scaled_dot_product_attention does not return.
+
+        Args:
+            x: (batch, length, width) vectors of the new tokens.
+            memory: (batch, tokens, width) caption token vectors.
+            mask: As in forward.
+
+        Returns:
+            (batch, heads, length, tokens) weights; each token's sum to 1 over the caption tokens.
+        """
+        batch, length, width = x.shape
+        size = width // self.heads
+        q = self.query(self.norm(x)).view(batch, length, self.heads, size).transpose(1, 2)
+        k = self.key_value(memory).split(width, dim=2)[0].view(batch, -1, self.heads, size).transpose(1, 2)
+        # scaled_dot_product_attention's default scale; its boolean mask is True where attention may go.
+        logits = q @ k.transpose(-2, -1) / math.sqrt(size)
+        if mask is not None:
+            logits = logits.masked_fill(~mask, float("-inf"))
+        return logits.softmax(-1)
+
 
 class Block(nn.Module):
     """One transformer block: causal self-attention, then an MLP.

@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import torch
 
-from pixl.model import Config, EncoderPixl
+from pixl.model import Config, CrossAttention, EncoderPixl
 from pixl.tokenizer import PAD
 
 # Check the dropout-gradient regression on Apple's GPU when it is available.
@@ -25,6 +25,21 @@ class RecomputeTest(unittest.TestCase):
             gradients.append([p.grad.cpu() for p in model.parameters() if p.grad is not None])
         for plain, recomputed in zip(*gradients):
             torch.testing.assert_close(plain, recomputed)
+
+
+class CrossAttentionWeightsTest(unittest.TestCase):
+    def test_weights_reproduce_forward(self) -> None:
+        torch.manual_seed(0)
+        cross = CrossAttention(SMALL)
+        x, memory = torch.randn(2, 5, SMALL.width), torch.randn(2, SMALL.caption, SMALL.width)
+        mask = torch.ones(2, 1, 1, SMALL.caption, dtype=torch.bool)
+        mask[0, ..., :3] = False  # a left-padded caption
+        weights = cross.weights(x, memory, mask)
+        heads, size = SMALL.heads, SMALL.width // SMALL.heads
+        v = cross.key_value(memory).split(SMALL.width, dim=2)[1].view(2, -1, heads, size).transpose(1, 2)
+        attended = (weights @ v).transpose(1, 2).reshape(2, 5, SMALL.width)
+        torch.testing.assert_close(cross.project(attended), cross(x, memory, None, mask))
+        self.assertTrue((weights[0, ..., :3] == 0).all())
 
 
 def weighted_cross_attention(model: EncoderPixl) -> EncoderPixl:
