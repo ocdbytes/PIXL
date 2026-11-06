@@ -13,7 +13,7 @@ The default run uses one million scenes for one epoch: 31,250 steps at batch siz
 ## Configuration
 
 | Setting | Default | Description |
-|---|---:|---|
+| --- | ---: | --- |
 | `--batch` | 32 | Scenes per optimizer step |
 | `--epochs` | 1 | Passes over the training split |
 | `--peak-lr` | `3e-4` | Learning rate after warm-up |
@@ -64,8 +64,7 @@ $$
 The optimized batch objective is
 
 $$
-L = \frac{1}{B}\sum_i l_i
-  + \frac{1}{BP}\sum_{i \in \text{non-empty}} \max(0, m - g_i).
+L = \frac{1}{B}\sum_i l_i + \frac{1}{BP}\sum_{i \in \text{non-empty}} \max(0, m - g_i).
 $$
 
 where $m$ is `--margin`. With the default margin of 2, the swapped caption must cost at least two nats more per scene than the correct caption. A row contributes no margin penalty once that separation is reached. `--margin 0` disables swapped-caption scoring.
@@ -83,7 +82,7 @@ The evaluation pool contains:
 Intermediate evaluations score every fourth scene in this pool. The final evaluation scores all scenes.
 
 | Measure | Definition |
-|---|---|
+| --- | --- |
 | Loss | Mean pixel cross-entropy under the correct caption |
 | Position | Fraction of scenes whose correct caption has lower loss than the dataset's position-swapped caption |
 
@@ -111,7 +110,7 @@ The checkpoint stores Python and PyTorch random states. In the resume test, a 40
 Each run writes to `checkpoints/<run>/`:
 
 | Path | Contents |
-|---|---|
+| --- | --- |
 | `checkpoint.pt` | Model, optimizer, step, configuration, random states, input fingerprints, logs and final scores |
 | `samples-<step>.png` | Fixed real scenes and generated previews at an evaluation step |
 
